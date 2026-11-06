@@ -82,3 +82,9 @@ add_executable(storage_tests
     tests/unit/storage_test.cpp
 )
 target_link_libraries(storage_tests PRIVATE kvdb_core)
+
+# Recovery engine unit tests
+add_executable(recovery_tests
+    tests/unit/recovery_test.cpp
+)
+target_link_libraries(recovery_tests PRIVATE kvdb_core)
