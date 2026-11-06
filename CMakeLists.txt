@@ -22,6 +22,7 @@ add_library(kvdb_core STATIC
     src/storage/index.cpp
     src/storage/storage_engine.cpp
     src/recovery/recovery.cpp
+    src/recovery/log_scanner.cpp
     src/concurrency/compactor.cpp
     src/cli/batch_parser.cpp
     src/database.cpp
@@ -88,3 +89,9 @@ add_executable(recovery_tests
     tests/unit/recovery_test.cpp
 )
 target_link_libraries(recovery_tests PRIVATE kvdb_core)
+
+# Phase 1: Log Scanner unit test
+add_executable(log_scanner_test
+    tests/unit/log_scanner_test.cpp
+)
+target_link_libraries(log_scanner_test PRIVATE kvdb_core)
