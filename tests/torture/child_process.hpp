@@ -23,6 +23,7 @@ public:
                    std::string& error);
     bool close_input(std::string& error);
     bool wait(std::chrono::milliseconds timeout, int& exit_code, std::string& error);
+    bool request_termination(std::string& error);
     bool terminate(std::string& error);
 
 private:

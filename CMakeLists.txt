@@ -90,6 +90,18 @@ target_include_directories(torture_tool_phase8 PRIVATE
 )
 target_link_libraries(torture_tool_phase8 PRIVATE Threads::Threads)
 
+# Phase 10 compaction-under-load crash/recovery runner.
+add_executable(torture_tool_phase10
+    tests/torture/torture_phase10_main.cpp
+    tests/torture/child_process.cpp
+    tests/torture/oracle.cpp
+)
+target_include_directories(torture_tool_phase10 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/torture
+)
+target_link_libraries(torture_tool_phase10 PRIVATE Threads::Threads)
+
 # Isolated Phase 6 child-process crash/recovery runner.
 add_executable(torture_tool_phase6
     tests/torture/torture_phase6_main.cpp

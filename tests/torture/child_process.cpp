@@ -440,6 +440,30 @@ bool ChildProcess::wait(std::chrono::milliseconds timeout, int& exit_code, std::
 #endif
 }
 
+bool ChildProcess::request_termination(std::string& error) {
+#if defined(_WIN32)
+    if (!impl_->process) {
+        error = "no child process to terminate";
+        return false;
+    }
+    if (!TerminateProcess(impl_->process, 137) &&
+        WaitForSingleObject(impl_->process, 0) != WAIT_OBJECT_0) {
+        error = "TerminateProcess failed: " + std::to_string(GetLastError());
+        return false;
+    }
+#else
+    if (impl_->pid <= 0) {
+        error = "no child process to terminate";
+        return false;
+    }
+    if (kill(impl_->pid, SIGKILL) != 0 && errno != ESRCH) {
+        error = std::string("SIGKILL failed: ") + std::strerror(errno);
+        return false;
+    }
+#endif
+    return true;
+}
+
 bool ChildProcess::terminate(std::string& error) {
 #if defined(_WIN32)
     if (impl_->process) {

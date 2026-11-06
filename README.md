@@ -129,6 +129,15 @@ The test-only `kvdb_crash_test` executable enables explicit crash hooks without 
 
 By default, the runner uses the `kvdb` and `kvdb_crash_test` executables beside itself and generates unique per-scenario DB/journal files that it removes after successful verification.
 
+## Phase 10 compaction-under-load crash testing
+
+The separate `torture_tool_phase10` runner sends seeded PUT/GET/DEL/BATCH workloads and COMPACT requests from concurrent workers to a `kvdb serve` child. It forcibly terminates the child at a seeded request boundary, restarts it for the next cycle, and checks file integrity and the complete recovered state against the ACK oracle. `--compact-rate N` schedules compaction with an average interval of N requests. The runner keeps the selected DB and oracle files, rejects a pre-existing pair that does not match, and prints the seed, cycle, and recent request history on failure.
+
+```bash
+./build/torture_tool_phase10 --seed 1337 --iterations 500 --threads 4
+./build/torture_tool_phase10 --seed 42 --iterations 20 --threads 8 --operations-per-cycle 32 --compact-rate 8 --db ./tmp/phase10.db --oracle ./tmp/phase10.ack.log
+```
+
 ## CLI interface
 
 The following command shape is the proposed judge-facing interface:
