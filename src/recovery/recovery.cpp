@@ -47,13 +47,19 @@ RecoveryResult RecoveryEngine::recover(storage::File& file, storage::Index& inde
 
     // Scan frames sequentially
     std::vector<std::uint8_t> read_buffer;
-    std::vector<storage::Frame> pending_tx_frames;
+    struct PendingOp {
+        RecordType type;
+        std::string key;
+        std::uint64_t val_offset;
+        std::uint64_t val_len;
+        TxId tx_id;
+    };
+    std::vector<PendingOp> pending_tx_ops;
     TxId current_tx_id = 0;
     bool in_transaction = false;
 
     while (cursor < file_len) {
         std::size_t bytes_to_read = static_cast<std::size_t>(std::min<std::uint64_t>(file_len - cursor, 64 * 1024 * 1024));
-        // Simple scan: read remaining file into memory for recovery
         read_buffer.resize(bytes_to_read);
         s = file.read_at(cursor, read_buffer.data(), bytes_to_read);
         if (!is_ok(s)) {
@@ -65,10 +71,11 @@ RecoveryResult RecoveryEngine::recover(storage::File& file, storage::Index& inde
         while (buffer_offset < bytes_to_read) {
             storage::Frame frame;
             std::size_t consumed = 0;
+            std::uint64_t frame_start_offset = cursor;
+
             s = storage::deserialize_frame(read_buffer.data() + buffer_offset, bytes_to_read - buffer_offset, frame, consumed);
             if (!is_ok(s)) {
-                // Encountered incomplete or corrupted frame
-                // If at the end of the file, this is an uncommitted/torn tail
+                // Incomplete or corrupted frame encountered at scan tail
                 break;
             }
 
@@ -76,28 +83,26 @@ RecoveryResult RecoveryEngine::recover(storage::File& file, storage::Index& inde
             cursor += consumed;
 
             if (frame.type == RecordType::Begin) {
-                pending_tx_frames.clear();
+                pending_tx_ops.clear();
                 current_tx_id = frame.tx_id;
                 in_transaction = true;
             } else if (in_transaction && frame.tx_id == current_tx_id) {
                 if (frame.type == RecordType::Commit) {
-                    // Transaction is committed: apply pending frames to in-memory index
-                    for (const auto& op : pending_tx_frames) {
+                    // Transaction is committed: publish to in-memory index
+                    for (const auto& op : pending_tx_ops) {
                         if (op.type == RecordType::Put) {
-                            storage::IndexEntry entry;
-                            entry.cached_value = op.value;
-                            entry.value_len = op.value.size();
-                            index.put(op.key, entry);
+                            index.put(op.key, storage::IndexEntry{op.val_offset, op.val_len, op.tx_id});
                         } else if (op.type == RecordType::Delete) {
                             index.remove(op.key);
                         }
                     }
-                    pending_tx_frames.clear();
+                    pending_tx_ops.clear();
                     in_transaction = false;
                     last_valid_sync_point = cursor;
                     res.committed_transactions++;
                 } else {
-                    pending_tx_frames.push_back(frame);
+                    std::uint64_t val_offset = frame_start_offset + storage::FRAME_HEADER_SIZE + frame.key.size();
+                    pending_tx_ops.push_back({frame.type, frame.key, val_offset, static_cast<std::uint64_t>(frame.value.size()), frame.tx_id});
                 }
             }
         }

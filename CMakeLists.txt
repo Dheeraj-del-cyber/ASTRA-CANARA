@@ -18,6 +18,7 @@ add_library(kvdb_core STATIC
     src/storage/format.cpp
     src/storage/file.cpp
     src/storage/index.cpp
+    src/storage/storage_engine.cpp
     src/recovery/recovery.cpp
     src/concurrency/compactor.cpp
     src/database.cpp
@@ -45,3 +46,9 @@ add_executable(unit_tests
     tests/unit/basic_test.cpp
 )
 target_link_libraries(unit_tests PRIVATE kvdb_core)
+
+# Storage engine unit & scale tests
+add_executable(storage_tests
+    tests/unit/storage_test.cpp
+)
+target_link_libraries(storage_tests PRIVATE kvdb_core)

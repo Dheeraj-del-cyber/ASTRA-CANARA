@@ -40,17 +40,35 @@ Status Compactor::compact(
         s = tmp_file.append(b_bytes.data(), b_bytes.size());
         if (!is_ok(s)) return s;
 
+        std::vector<std::pair<std::string, storage::IndexEntry>> new_index_entries;
+        std::uint64_t cur_tmp_offset = tmp_file.size();
+
         for (const auto& [k, v] : entries) {
-            storage::Frame put_frame{RecordType::Put, tx_id, k, v.cached_value};
+            std::string val;
+            if (v.val_len > 0) {
+                val.resize(static_cast<std::size_t>(v.val_len));
+                file.read_at(v.val_file_offset, reinterpret_cast<std::uint8_t*>(&val[0]), static_cast<std::size_t>(v.val_len));
+            }
+            storage::Frame put_frame{RecordType::Put, tx_id, k, val};
             auto p_bytes = storage::serialize_frame(put_frame);
             s = tmp_file.append(p_bytes.data(), p_bytes.size());
             if (!is_ok(s)) return s;
+
+            std::uint64_t new_val_offset = cur_tmp_offset + storage::FRAME_HEADER_SIZE + k.size();
+            new_index_entries.emplace_back(k, storage::IndexEntry{new_val_offset, v.val_len, tx_id});
+            cur_tmp_offset += p_bytes.size();
         }
 
         storage::Frame commit_frame{RecordType::Commit, tx_id, "", ""};
         auto c_bytes = storage::serialize_frame(commit_frame);
         s = tmp_file.append(c_bytes.data(), c_bytes.size());
         if (!is_ok(s)) return s;
+
+        // Rebuild index with compacted offsets
+        index.clear();
+        for (const auto& [k, v] : new_index_entries) {
+            index.put(k, v);
+        }
     }
 
     // 4. Flush and sync tmp file
