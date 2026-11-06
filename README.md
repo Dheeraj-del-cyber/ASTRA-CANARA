@@ -102,6 +102,18 @@ The additive Phase 5 runner is built as `torture_tool_phase5`, leaving the exist
 
 The `all` mode uses the 50/30/15/5 PUT/GET/DEL/BATCH distribution. Batch mode generates batches of 1–500 operations. `--iterations` is the total number of top-level operations shared across workers.
 
+## Phase 6 crash/recovery torture
+
+The separate `torture_tool_phase6` target starts `kvdb serve` as a child process, sends acknowledged operations, abruptly kills the child after each workload cycle, then runs `kvdb check` and `kvdb dump` to verify recovered state against the persistent ACK oracle. Each cycle also submits a batch and kills the server before acknowledging it; if no ACK was observed, the batch must be absent after recovery.
+
+```bash
+./build/torture_tool_phase6 --seed 1337 --iterations 500 --mode all
+./build/torture_tool_phase6 --seed 42 --iterations 50 --mode crash --reset
+./build/torture_tool_phase6 --kvdb ./build/kvdb --db ./tmp/crash.db --oracle ./tmp/crash.ack.log
+```
+
+By default the Phase 6 runner uses separate `torture_phase6.db` and `torture_phase6.ack.log` files and looks for the `kvdb` executable beside itself. Use `--reset` only when intentionally discarding those specified test files. Modes are `all` (mixed workload plus crash batches), `batch` (batch workload plus crash batches), and `crash` (only interrupted-batch crash cycles).
+
 ## CLI interface
 
 The following command shape is the proposed judge-facing interface:
