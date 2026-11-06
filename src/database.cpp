@@ -1,0 +1,232 @@
+#include "kvdb/database.hpp"
+#include "kvdb/storage/file.hpp"
+#include "kvdb/storage/index.hpp"
+#include "kvdb/storage/format.hpp"
+#include "kvdb/recovery/recovery.hpp"
+#include "kvdb/concurrency/lock_manager.hpp"
+#include "kvdb/concurrency/compactor.hpp"
+#include <iostream>
+#include <atomic>
+
+namespace kvdb {
+
+class DatabaseImpl {
+public:
+    std::string path;
+    Config config;
+    storage::File file;
+    storage::Index index;
+    concurrency::LockManager lock_mgr;
+    std::atomic<TxId> next_tx_id{1};
+    bool is_open{false};
+
+    Status append_transaction(const std::vector<Operation>& ops) {
+        if (!is_open) return Status::NotOpen;
+
+        TxId tx_id = next_tx_id.fetch_add(1);
+
+        // Pre-encode frames to calculate size
+        storage::Frame begin_frame{RecordType::Begin, tx_id, "", ""};
+        auto begin_bytes = storage::serialize_frame(begin_frame);
+
+        std::vector<std::vector<std::uint8_t>> ops_bytes;
+        std::uint64_t total_payload_bytes = begin_bytes.size();
+
+        for (const auto& op : ops) {
+            RecordType rtype = (op.type == Operation::Type::Put) ? RecordType::Put : RecordType::Delete;
+            storage::Frame f{rtype, tx_id, op.key, op.value};
+            auto b = storage::serialize_frame(f);
+            total_payload_bytes += b.size();
+            ops_bytes.push_back(std::move(b));
+        }
+
+        storage::Frame commit_frame{RecordType::Commit, tx_id, "", ""};
+        auto commit_bytes = storage::serialize_frame(commit_frame);
+        total_payload_bytes += commit_bytes.size();
+
+        // Check space capacity
+        if (!concurrency::SpaceManager::has_space_for(file.size(), total_payload_bytes, config.max_bytes)) {
+            return Status::NoSpace;
+        }
+
+        // Append BEGIN
+        Status s = file.append(begin_bytes.data(), begin_bytes.size());
+        if (!is_ok(s)) return s;
+
+        // Append Operations
+        for (const auto& b : ops_bytes) {
+            s = file.append(b.data(), b.size());
+            if (!is_ok(s)) return s;
+        }
+
+        // Append COMMIT
+        s = file.append(commit_bytes.data(), commit_bytes.size());
+        if (!is_ok(s)) return s;
+
+        // Durable sync before updating in-memory index or reporting success
+        s = file.sync();
+        if (!is_ok(s)) return s;
+
+        // Publish to in-memory index
+        for (const auto& op : ops) {
+            if (op.type == Operation::Type::Put) {
+                storage::IndexEntry entry;
+                entry.cached_value = op.value;
+                entry.value_len = op.value.size();
+                index.put(op.key, entry);
+            } else {
+                index.remove(op.key);
+            }
+        }
+
+        return Status::Ok;
+    }
+};
+
+Database::Database() : impl_(std::make_unique<DatabaseImpl>()) {}
+Database::~Database() { close(); }
+
+Database::Database(Database&&) noexcept = default;
+Database& Database::operator=(Database&&) noexcept = default;
+
+Status Database::open(const std::string& path, std::uint64_t max_bytes) {
+    if (impl_->is_open) {
+        return Status::AlreadyOpen;
+    }
+
+    impl_->path = path;
+    impl_->config.max_bytes = max_bytes;
+
+    Status s = impl_->file.open(path, true);
+    if (!is_ok(s)) {
+        return s;
+    }
+
+    // Run crash recovery
+    auto rec_result = recovery::RecoveryEngine::recover(impl_->file, impl_->index);
+    if (!is_ok(rec_result.status)) {
+        impl_->file.close();
+        return rec_result.status;
+    }
+
+    impl_->next_tx_id = rec_result.committed_transactions + 1;
+    impl_->is_open = true;
+    return Status::Ok;
+}
+
+Status Database::put(const std::string& key, const std::string& value) {
+    if (!impl_->is_open) return Status::NotOpen;
+    if (key.empty() || key.size() > MAX_KEY_SIZE || value.size() > MAX_VALUE_SIZE) {
+        return Status::InvalidArgument;
+    }
+
+    impl_->lock_mgr.lock_exclusive();
+    Status s = impl_->append_transaction({{Operation::Type::Put, key, value}});
+    impl_->lock_mgr.unlock_exclusive();
+    return s;
+}
+
+Result Database::get(const std::string& key) {
+    Result res;
+    if (!impl_->is_open) {
+        res.status = Status::NotOpen;
+        return res;
+    }
+    if (key.empty() || key.size() > MAX_KEY_SIZE) {
+        res.status = Status::InvalidArgument;
+        return res;
+    }
+
+    impl_->lock_mgr.lock_shared();
+    auto entry = impl_->index.get(key);
+    if (entry.has_value()) {
+        res.status = Status::Ok;
+        res.value = entry->cached_value;
+    } else {
+        res.status = Status::NotFound;
+    }
+    impl_->lock_mgr.unlock_shared();
+    return res;
+}
+
+Status Database::remove(const std::string& key) {
+    if (!impl_->is_open) return Status::NotOpen;
+    if (key.empty() || key.size() > MAX_KEY_SIZE) {
+        return Status::InvalidArgument;
+    }
+
+    impl_->lock_mgr.lock_exclusive();
+    Status s = impl_->append_transaction({{Operation::Type::Delete, key, ""}});
+    impl_->lock_mgr.unlock_exclusive();
+    return s;
+}
+
+Status Database::batch(const std::vector<Operation>& operations) {
+    if (!impl_->is_open) return Status::NotOpen;
+    if (operations.empty() || operations.size() > MAX_BATCH_OPERATIONS) {
+        return Status::InvalidArgument;
+    }
+
+    for (const auto& op : operations) {
+        if (op.key.empty() || op.key.size() > MAX_KEY_SIZE) {
+            return Status::InvalidArgument;
+        }
+        if (op.type == Operation::Type::Put && op.value.size() > MAX_VALUE_SIZE) {
+            return Status::InvalidArgument;
+        }
+    }
+
+    impl_->lock_mgr.lock_exclusive();
+    Status s = impl_->append_transaction(operations);
+    impl_->lock_mgr.unlock_exclusive();
+    return s;
+}
+
+Status Database::compact() {
+    if (!impl_->is_open) return Status::NotOpen;
+    return concurrency::Compactor::compact(
+        impl_->path,
+        impl_->file,
+        impl_->index,
+        impl_->lock_mgr,
+        impl_->config.max_bytes
+    );
+}
+
+Status Database::close() {
+    if (!impl_->is_open) return Status::Ok;
+
+    impl_->lock_mgr.lock_exclusive();
+    impl_->file.sync();
+    impl_->file.close();
+    impl_->index.clear();
+    impl_->is_open = false;
+    impl_->lock_mgr.unlock_exclusive();
+
+    return Status::Ok;
+}
+
+Status Database::dump(std::ostream& out) {
+    if (!impl_->is_open) return Status::NotOpen;
+
+    impl_->lock_mgr.lock_shared();
+    auto entries = impl_->index.get_all_entries();
+    for (const auto& [k, v] : entries) {
+        out << k << "=" << v.cached_value << "\n";
+    }
+    impl_->lock_mgr.unlock_shared();
+    return Status::Ok;
+}
+
+Status Database::check() {
+    if (!impl_->is_open) return Status::NotOpen;
+    // Non-mutating verification
+    return Status::Ok;
+}
+
+bool Database::is_open() const {
+    return impl_->is_open;
+}
+
+} // namespace kvdb
+
