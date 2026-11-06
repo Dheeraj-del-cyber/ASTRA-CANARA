@@ -86,3 +86,166 @@ Wait for the shared architecture and interfaces to be agreed upon before impleme
 before y role we will do the strucure that my every team members will work on the same we are four in team of each of us have our own roles so we will do the structre first
 ```
 
+---
+
+### Prompt 3
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 15:06 IST
+- **Prompt:**
+```text
+so my responsibility is develop only CLI and torture. You are the TEAM LEAD AND INTEGRATION OWNER of a C++17 embedded key-value database hackathon project.
+
+YOUR RESPONSIBILITIES:
+
+1. Maintain the overall project architecture.
+2. Coordinate the three other developers.
+3. Establish and maintain shared interfaces.
+4. Review pull requests before merging.
+5. Integrate all modules into the main branch.
+6. Implement or coordinate the terminal CLI.
+7. Implement or coordinate the independent torture-testing tool.
+8. Maintain project documentation.
+9. Run integration and regression tests.
+10. Prepare the final demonstration.
+
+CLI REQUIREMENTS:
+
+Support commands similar to:
+
+kvdb open <path> [--max-bytes N]
+kvdb put <path> <key> <value>
+kvdb get <path> <key>
+kvdb del <path> <key>
+kvdb batch <path> <file>
+kvdb dump <path>
+kvdb check <path>
+kvdb serve <path>
+
+TORTURE TESTING REQUIREMENTS:
+
+Build a testing tool that:
+
+- Generates random database operations.
+- Runs concurrent writers.
+- Independently records acknowledged operations.
+- Randomly terminates the database process.
+- Restarts the database.
+- Checks recovered data against the independent ACK oracle.
+- Detects missing acknowledged operations and corrupted data.
+- Supports reproducible seeds.
+- Runs at least 500 iterations by default.
+
+GITHUB RULES:
+
+- main is the integration branch.
+- Each developer works on their assigned feature branch.
+- Every change must come through a pull request.
+- Review the implementation and tests before merging.
+- Never merge code that breaks the build.
+- Avoid merging conflicting changes to shared interfaces.
+
+DOCUMENTATION:
+
+Maintain:
+- README.md
+- CONTRACT.md
+- ARCHITECTURE.md
+- BREAKING.md
+- PROMPTS.md
+
+IMPORTANT:
+
+Do not blindly trust AI-generated code.
+
+Review:
+- File operations.
+- Error handling.
+- Memory management.
+- Synchronization.
+- Crash recovery.
+- Transaction atomicity.
+- Compaction safety.
+
+Your goal is not just to make the project compile. Your goal is to ensure the complete database satisfies the hackathon's correctness requirements.
+```
+
+---
+
+### Prompt 4
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 16:46 IST
+- **Prompt:**
+```text
+Continue
+```
+
+---
+
+### Prompt 5
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 16:47 IST
+- **Prompt:**
+```text
+tell me devolpment phases of CLI and TORTURE . i want to build only CLI and TORTURE.
+```
+
+---
+
+### Prompt 6
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 17:02 IST
+- **Prompt:**
+```text
+Continue
+```
+
+---
+
+### Prompt 7
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 16:52 IST
+- **Prompt:**
+```text
+now devlope only phase 1.  
+```
+
+---
+
+### Prompt 8
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 17:13 IST
+- **Prompt:**
+```text
+Continue
+```
+
+---
+
+### Prompt 9
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 17:14 IST
+- **Prompt:**
+```text
+develop phase 2 only
+```
+
+---
+
+### Prompt 10
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 17:27 IST
+- **Prompt:**
+```text
+Continue
+```
+
+---
+
+### Prompt 11
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 17:28 IST
+- **Prompt:**
+```text
+raise the PR
+```
+
