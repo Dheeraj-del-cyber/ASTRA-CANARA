@@ -37,11 +37,13 @@ target_link_libraries(kvdb PRIVATE kvdb_core)
 # Torture testing tool
 add_executable(torture_tool
     tests/torture/torture_main.cpp
+    tests/torture/oracle.cpp
 )
 target_link_libraries(torture_tool PRIVATE kvdb_core)
 
 # Basic unit test
 add_executable(unit_tests
     tests/unit/basic_test.cpp
+    tests/torture/oracle.cpp
 )
 target_link_libraries(unit_tests PRIVATE kvdb_core)
