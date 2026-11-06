@@ -309,4 +309,66 @@ raise the PR
 now, develop phase 3
 ```
 
+---
+
+### Prompt 13
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 18:30 IST
+- **Prompt:**
+```text
+We received feedback from our hackathon mentors.
+
+They appreciated our choice of C++ and recommended that we pay special attention to database metadata and backend architecture.
+
+We have already started implementation. Do not blindly rewrite existing code.
+
+Your new task is to REVIEW AND VALIDATE THE COMPLETE BACKEND ARCHITECTURE.
+
+STEP 1: Inspect the existing repository.
+STEP 2: Understand the complete data flow.
+STEP 3: METADATA DESIGN
+STEP 4: BINARY FORMAT REVIEW
+STEP 5: TRANSACTION AND DURABILITY REVIEW
+STEP 6: RECOVERY REVIEW
+STEP 7: INTEGRATION REVIEW
+
+IMPORTANT RESTRICTIONS:
+- Do not independently modify the shared binary format.
+- Do not introduce a second transaction protocol.
+- Do not rewrite other members' code.
+- Do not delete existing working functionality.
+- Do not claim crash safety without evidence.
+```
+
+---
+
+### Prompt 14
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 22:04 IST
+- **Prompt:**
+```text
+push the code
+```
+
+---
+
+### Prompt 15
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 22:30 IST
+- **Prompt:**
+```text
+go thorough the merged things and see anyconflictsis there if no and tell me how to start tsting andd all
+```
+
+---
+
+### Prompt 16
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 22:44 IST
+- **Prompt:**
+```text
+can you remove feature/crash-recovery branch and move it to the main branch we onlt need one branch not multiples
+```
+
+
 
