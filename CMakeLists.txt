@@ -20,6 +20,7 @@ add_library(kvdb_core STATIC
     src/storage/index.cpp
     src/recovery/recovery.cpp
     src/concurrency/compactor.cpp
+    src/cli/batch_parser.cpp
     src/database.cpp
 )
 
@@ -30,7 +31,6 @@ target_include_directories(kvdb_core PUBLIC
 # CLI executable
 add_executable(kvdb
     src/cli/main.cpp
-    src/cli/batch_parser.cpp
 )
 target_link_libraries(kvdb PRIVATE kvdb_core)
 
