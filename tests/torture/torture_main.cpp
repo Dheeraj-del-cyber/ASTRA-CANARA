@@ -1,25 +1,10 @@
 #include "kvdb/database.hpp"
+#include "oracle.hpp"
 #include <iostream>
+#include <exception>
+#include <memory>
 #include <random>
-#include <unordered_map>
 #include <string>
-#include <cassert>
-
-// Independent Oracle
-class SimpleOracle {
-public:
-    void record_put(const std::string& key, const std::string& val) {
-        state_[key] = val;
-    }
-    void record_del(const std::string& key) {
-        state_.erase(key);
-    }
-    const std::unordered_map<std::string, std::string>& state() const {
-        return state_;
-    }
-private:
-    std::unordered_map<std::string, std::string> state_;
-};
 
 int main(int argc, char* argv[]) {
     unsigned int seed = 42;
@@ -33,10 +18,14 @@ int main(int argc, char* argv[]) {
     std::uniform_int_distribution<int> key_dist(1, 1000);
 
     std::string test_db = "torture_test.db";
-    // Remove old test db
-    std::remove(test_db.c_str());
+    std::unique_ptr<AckOracle> oracle;
+    try {
+        oracle = std::make_unique<AckOracle>("oracle.ack.log");
+    } catch (const std::exception& ex) {
+        std::cerr << "[Torture] Failed to load ACK oracle: " << ex.what() << "\n";
+        return 1;
+    }
 
-    SimpleOracle oracle;
     {
         kvdb::Database db;
         kvdb::Status s = db.open(test_db);
@@ -52,16 +41,22 @@ int main(int argc, char* argv[]) {
             if (op == 0) { // PUT
                 std::string val = "val_" + std::to_string(i);
                 s = db.put(key, val);
-                if (kvdb::is_ok(s)) {
-                    // Only update oracle after durable ACK
-                    oracle.record_put(key, val);
+                if (!kvdb::is_ok(s)) {
+                    std::cerr << "[Torture] PUT failed: " << kvdb::status_to_string(s) << "\n";
+                    return 1;
+                }
+                // The database call returns only after its durable ACK.
+                std::string error;
+                if (!oracle->record_put(key, val, error)) {
+                    std::cerr << "[Torture] Failed to persist acknowledged PUT: " << error << "\n";
+                    return 1;
                 }
             } else if (op == 1) { // GET
                 auto res = db.get(key);
-                auto it = oracle.state().find(key);
-                if (it != oracle.state().end()) {
-                    if (!kvdb::is_ok(res.status) || res.value != it->second) {
-                        std::cerr << "[Torture] Mismatch on GET " << key << ": expected " << it->second << ", got " << res.value << "\n";
+                const auto expected = oracle->get(key);
+                if (expected.has_value()) {
+                    if (!kvdb::is_ok(res.status) || res.value != *expected) {
+                        std::cerr << "[Torture] Mismatch on GET " << key << ": expected " << *expected << ", got " << res.value << "\n";
                         return 1;
                     }
                 } else {
@@ -72,8 +67,14 @@ int main(int argc, char* argv[]) {
                 }
             } else if (op == 2) { // DEL
                 s = db.remove(key);
-                if (kvdb::is_ok(s)) {
-                    oracle.record_del(key);
+                if (!kvdb::is_ok(s)) {
+                    std::cerr << "[Torture] DEL failed: " << kvdb::status_to_string(s) << "\n";
+                    return 1;
+                }
+                std::string error;
+                if (!oracle->record_del(key, error)) {
+                    std::cerr << "[Torture] Failed to persist acknowledged DEL: " << error << "\n";
+                    return 1;
                 }
             }
         }
@@ -89,7 +90,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        for (const auto& [k, v] : oracle.state()) {
+        for (const auto& [k, v] : oracle->snapshot()) {
             auto res = db.get(k);
             if (!kvdb::is_ok(res.status) || res.value != v) {
                 std::cerr << "[Torture] Post-recovery mismatch for key " << k << "\n";
@@ -99,7 +100,5 @@ int main(int argc, char* argv[]) {
         std::cout << "[Torture] Passed all " << iterations << " operations successfully!\n";
     }
 
-    std::remove(test_db.c_str());
     return 0;
 }
-

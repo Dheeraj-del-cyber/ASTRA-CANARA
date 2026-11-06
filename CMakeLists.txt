@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.15)
 project(kvdb VERSION 1.0.0 LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -21,6 +23,7 @@ add_library(kvdb_core STATIC
     src/storage/storage_engine.cpp
     src/recovery/recovery.cpp
     src/concurrency/compactor.cpp
+    src/cli/batch_parser.cpp
     src/database.cpp
 )
 
@@ -31,19 +34,40 @@ target_include_directories(kvdb_core PUBLIC
 # CLI executable
 add_executable(kvdb
     src/cli/main.cpp
-    src/cli/batch_parser.cpp
 )
 target_link_libraries(kvdb PRIVATE kvdb_core)
 
 # Torture testing tool
 add_executable(torture_tool
     tests/torture/torture_main.cpp
+    tests/torture/oracle.cpp
 )
 target_link_libraries(torture_tool PRIVATE kvdb_core)
+
+# Additive Phase 5 runner; the existing Phase 4 torture_tool remains unchanged.
+add_executable(torture_tool_phase5
+    tests/torture/torture_phase5_main.cpp
+    tests/torture/oracle.cpp
+)
+target_link_libraries(torture_tool_phase5 PRIVATE kvdb_core Threads::Threads)
+
+add_executable(workload_generator_tests
+    tests/torture/workload_generator_test.cpp
+)
+target_link_libraries(workload_generator_tests PRIVATE kvdb_core)
+
+# Isolated Phase 6 child-process crash/recovery runner.
+add_executable(torture_tool_phase6
+    tests/torture/torture_phase6_main.cpp
+    tests/torture/child_process.cpp
+    tests/torture/oracle.cpp
+)
+target_link_libraries(torture_tool_phase6 PRIVATE kvdb_core)
 
 # Basic unit test
 add_executable(unit_tests
     tests/unit/basic_test.cpp
+    tests/torture/oracle.cpp
 )
 target_link_libraries(unit_tests PRIVATE kvdb_core)
 

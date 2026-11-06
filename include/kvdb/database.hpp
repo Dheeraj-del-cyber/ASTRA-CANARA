@@ -36,6 +36,7 @@ public:
     // Maintenance & inspection tools
     Status dump(std::ostream& out);
     Status check();
+    static Status check_file(const std::string& path);
 
     // Query state
     bool is_open() const;
