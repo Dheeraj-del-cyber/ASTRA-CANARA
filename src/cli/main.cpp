@@ -85,6 +85,18 @@ int main(int argc, char* argv[]) {
             return EXIT_CLI_SUCCESS;
         }
 
+        // --- CHECK command (read-only verification without modifying/truncating file) ---
+        if (command == "check") {
+            kvdb::Status s = kvdb::Database::check_file(db_path);
+            if (kvdb::is_ok(s)) {
+                std::cout << "INTEGRITY_OK\n";
+                return EXIT_CLI_SUCCESS;
+            } else {
+                std::cerr << "INTEGRITY_FAILED: " << kvdb::status_to_string(s) << "\n";
+                return EXIT_CLI_ERROR;
+            }
+        }
+
         // For all other commands, open the database first
         kvdb::Status s = db.open(db_path);
         if (!kvdb::is_ok(s)) {
@@ -197,55 +209,122 @@ int main(int argc, char* argv[]) {
             return kvdb::is_ok(s) ? EXIT_CLI_SUCCESS : EXIT_CLI_ERROR;
         }
 
-        // --- 7. CHECK command ---
-        if (command == "check") {
-            s = db.check();
-            db.close();
-            if (kvdb::is_ok(s)) {
-                std::cout << "INTEGRITY_OK\n";
-                return EXIT_CLI_SUCCESS;
-            } else {
-                std::cerr << "INTEGRITY_FAILED: " << kvdb::status_to_string(s) << "\n";
-                return EXIT_CLI_ERROR;
-            }
-        }
-
-        // --- 8. SERVE command ---
+        // --- 7. SERVE command ---
         if (command == "serve") {
             std::string line;
             while (std::getline(std::cin, line)) {
-                if (line.empty() || line == "QUIT") break;
+                // Strip CR if present
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                if (line.empty()) continue;
+                if (line == "QUIT") break;
+
                 std::istringstream iss(line);
-                std::string op, op_id, key, val;
-                if (!(iss >> op >> op_id >> key)) {
+                std::string op, op_id;
+                if (!(iss >> op)) {
+                    continue;
+                }
+
+                if (op == "QUIT") {
+                    break;
+                }
+
+                if (!(iss >> op_id)) {
                     std::cout << "ERR invalid_command\n";
                     std::cout.flush();
                     continue;
                 }
+
                 if (op == "PUT") {
-                    std::getline(iss, val);
-                    if (!val.empty() && val[0] == ' ') val = val.substr(1);
-                    s = db.put(key, val);
-                    if (kvdb::is_ok(s)) {
-                        std::cout << "ACK " << op_id << "\n";
+                    std::string key, val;
+                    if (!(iss >> key)) {
+                        std::cout << "ERR " << op_id << " missing_key\n";
                     } else {
-                        std::cout << "ERR " << op_id << " " << kvdb::status_to_string(s) << "\n";
+                        std::getline(iss, val);
+                        if (!val.empty() && val[0] == ' ') {
+                            val = val.substr(1);
+                        }
+                        std::string unescaped_val = kvdb::cli::BatchParser::unescape(val);
+                        s = db.put(key, unescaped_val);
+                        if (kvdb::is_ok(s)) {
+                            // Durability guarantee: ACK only after durable sync
+                            std::cout << "ACK " << op_id << "\n";
+                        } else {
+                            std::cout << "ERR " << op_id << " " << kvdb::status_to_string(s) << "\n";
+                        }
                     }
                 } else if (op == "DEL") {
-                    s = db.remove(key);
+                    std::string key;
+                    if (!(iss >> key)) {
+                        std::cout << "ERR " << op_id << " missing_key\n";
+                    } else {
+                        s = db.remove(key);
+                        if (kvdb::is_ok(s)) {
+                            std::cout << "ACK " << op_id << "\n";
+                        } else {
+                            std::cout << "ERR " << op_id << " " << kvdb::status_to_string(s) << "\n";
+                        }
+                    }
+                } else if (op == "GET") {
+                    std::string key;
+                    if (!(iss >> key)) {
+                        std::cout << "ERR " << op_id << " missing_key\n";
+                    } else {
+                        auto res = db.get(key);
+                        if (kvdb::is_ok(res.status)) {
+                            std::cout << "VALUE " << op_id << " " << res.value << "\n";
+                        } else if (res.status == kvdb::Status::NotFound) {
+                            std::cout << "NOT_FOUND " << op_id << "\n";
+                        } else {
+                            std::cout << "ERR " << op_id << " " << kvdb::status_to_string(res.status) << "\n";
+                        }
+                    }
+                } else if (op == "BATCH") {
+                    std::string batch_file;
+                    if (!(iss >> batch_file)) {
+                        std::cout << "ERR " << op_id << " missing_batch_file\n";
+                    } else {
+                        std::vector<kvdb::Operation> ops;
+                        s = kvdb::cli::BatchParser::parse_file(batch_file, ops);
+                        if (!kvdb::is_ok(s)) {
+                            std::cout << "ERR " << op_id << " invalid_batch_file\n";
+                        } else {
+                            s = db.batch(ops);
+                            if (kvdb::is_ok(s)) {
+                                std::cout << "ACK " << op_id << "\n";
+                            } else {
+                                std::cout << "ERR " << op_id << " " << kvdb::status_to_string(s) << "\n";
+                            }
+                        }
+                    }
+                } else if (op == "COMPACT") {
+                    s = db.compact();
                     if (kvdb::is_ok(s)) {
                         std::cout << "ACK " << op_id << "\n";
                     } else {
                         std::cout << "ERR " << op_id << " " << kvdb::status_to_string(s) << "\n";
                     }
-                } else if (op == "GET") {
-                    auto res = db.get(key);
-                    if (kvdb::is_ok(res.status)) {
-                        std::cout << "VALUE " << op_id << " " << res.value << "\n";
+                } else if (op == "CHECK") {
+                    s = db.check();
+                    if (kvdb::is_ok(s)) {
+                        std::cout << "INTEGRITY_OK " << op_id << "\n";
                     } else {
-                        std::cout << "NOT_FOUND " << op_id << "\n";
+                        std::cout << "INTEGRITY_FAILED " << op_id << " " << kvdb::status_to_string(s) << "\n";
                     }
+                } else if (op == "DUMP") {
+                    s = db.dump(std::cout);
+                    if (kvdb::is_ok(s)) {
+                        std::cout << "ACK " << op_id << "\n";
+                    } else {
+                        std::cout << "ERR " << op_id << " " << kvdb::status_to_string(s) << "\n";
+                    }
+                } else if (op == "PING") {
+                    std::cout << "PONG " << op_id << "\n";
+                } else {
+                    std::cout << "ERR " << op_id << " unknown_command\n";
                 }
+
                 std::cout.flush();
             }
             db.close();

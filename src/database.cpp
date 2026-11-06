@@ -7,6 +7,8 @@
 #include "kvdb/concurrency/compactor.hpp"
 #include <iostream>
 #include <atomic>
+#include <algorithm>
+#include <cstring>
 
 namespace kvdb {
 
@@ -211,6 +213,10 @@ Status Database::dump(std::ostream& out) {
 
     impl_->lock_mgr.lock_shared();
     auto entries = impl_->index.get_all_entries();
+    // Deterministic lexicographical sort by key
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
     for (const auto& [k, v] : entries) {
         out << k << "=" << v.cached_value << "\n";
     }
@@ -220,8 +226,91 @@ Status Database::dump(std::ostream& out) {
 
 Status Database::check() {
     if (!impl_->is_open) return Status::NotOpen;
-    // Non-mutating verification
-    return Status::Ok;
+    return check_file(impl_->path);
+}
+
+Status Database::check_file(const std::string& path) {
+    storage::File file;
+    Status s = file.open(path, false);
+    if (!is_ok(s)) {
+        return s;
+    }
+
+    std::uint64_t file_len = file.size();
+    if (file_len < sizeof(storage::RawFileHeader)) {
+        file.close();
+        return Status::Corruption;
+    }
+
+    // 1. Verify 32-byte header
+    std::vector<std::uint8_t> hdr_buf(sizeof(storage::RawFileHeader));
+    s = file.read_at(0, hdr_buf.data(), hdr_buf.size());
+    if (!is_ok(s)) {
+        file.close();
+        return s;
+    }
+
+    s = storage::deserialize_file_header(hdr_buf.data(), hdr_buf.size());
+    if (!is_ok(s)) {
+        file.close();
+        return Status::Corruption;
+    }
+
+    // 2. Sequential frame walk without mutation
+    std::uint64_t cursor = sizeof(storage::RawFileHeader);
+    std::vector<std::uint8_t> frame_hdr_buf(sizeof(storage::RawFrameHeader));
+
+    while (cursor < file_len) {
+        if (file_len - cursor < sizeof(storage::RawFrameHeader) + sizeof(std::uint32_t)) {
+            // Torn or incomplete trailing bytes
+            file.close();
+            return Status::Corruption;
+        }
+
+        s = file.read_at(cursor, frame_hdr_buf.data(), sizeof(storage::RawFrameHeader));
+        if (!is_ok(s)) {
+            file.close();
+            return s;
+        }
+
+        const auto* hdr = reinterpret_cast<const storage::RawFrameHeader*>(frame_hdr_buf.data());
+        if (hdr->frame_magic != FRAME_MAGIC || hdr->format_version != FRAME_FORMAT_VERSION) {
+            file.close();
+            return Status::Corruption;
+        }
+
+        if (hdr->key_len > MAX_KEY_SIZE || hdr->val_len > MAX_VALUE_SIZE) {
+            file.close();
+            return Status::Corruption;
+        }
+
+        std::uint64_t total_frame_size = sizeof(storage::RawFrameHeader) + hdr->key_len + hdr->val_len + sizeof(std::uint32_t);
+        if (cursor + total_frame_size > file_len) {
+            file.close();
+            return Status::Corruption;
+        }
+
+        // Validate frame CRC32
+        std::vector<std::uint8_t> full_frame(total_frame_size);
+        s = file.read_at(cursor, full_frame.data(), total_frame_size);
+        if (!is_ok(s)) {
+            file.close();
+            return s;
+        }
+
+        std::uint32_t stored_crc;
+        std::memcpy(&stored_crc, full_frame.data() + total_frame_size - sizeof(std::uint32_t), sizeof(std::uint32_t));
+        std::uint32_t computed_crc = storage::calculate_crc32(full_frame.data(), total_frame_size - sizeof(std::uint32_t));
+        if (stored_crc != computed_crc) {
+            file.close();
+            return Status::Corruption;
+        }
+
+        cursor += total_frame_size;
+    }
+
+    file.close();
+    return (cursor == file_len) ? Status::Ok : Status::Corruption;
 }
 
 bool Database::is_open() const {
