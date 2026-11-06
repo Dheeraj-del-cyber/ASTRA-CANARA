@@ -131,9 +131,8 @@ Status Compactor::compact(
             return Status::NoSpace;
         }
         for (const auto& entry : entries) {
-            const auto frame_bytes = storage::serialize_frame(
-                storage::Frame{RecordType::Put, tx_id, entry.first, entry.second.cached_value});
-            const auto frame_size = static_cast<std::uint64_t>(frame_bytes.size());
+            const auto frame_size = static_cast<std::uint64_t>(
+                storage::calculate_frame_size(entry.first.size(), static_cast<std::size_t>(entry.second.val_len)));
             if (!add_size(frame_size, compacted_size)) return Status::NoSpace;
         }
     }
@@ -180,6 +179,8 @@ Status Compactor::compact(
         return error;
     }
 
+    std::vector<std::pair<std::string, storage::IndexEntry>> new_index_entries;
+
     if (!entries.empty()) {
         s = tmp_file.append(begin_bytes.data(), begin_bytes.size());
         if (!is_ok(s)) {
@@ -188,8 +189,15 @@ Status Compactor::compact(
             return error;
         }
 
+        std::uint64_t cur_tmp_offset = tmp_file.size();
+
         for (const auto& [k, v] : entries) {
-            storage::Frame put_frame{RecordType::Put, tx_id, k, v.cached_value};
+            std::string val;
+            if (v.val_len > 0) {
+                val.resize(static_cast<std::size_t>(v.val_len));
+                file.read_at(v.val_file_offset, reinterpret_cast<std::uint8_t*>(&val[0]), static_cast<std::size_t>(v.val_len));
+            }
+            storage::Frame put_frame{RecordType::Put, tx_id, k, val};
             auto p_bytes = storage::serialize_frame(put_frame);
             s = tmp_file.append(p_bytes.data(), p_bytes.size());
             if (!is_ok(s)) {
@@ -197,6 +205,10 @@ Status Compactor::compact(
                 discard_temp();
                 return error;
             }
+
+            std::uint64_t new_val_offset = cur_tmp_offset + storage::FRAME_HEADER_SIZE + k.size();
+            new_index_entries.emplace_back(k, storage::IndexEntry{new_val_offset, v.val_len, tx_id});
+            cur_tmp_offset += p_bytes.size();
         }
 
         s = tmp_file.append(commit_bytes.data(), commit_bytes.size());
@@ -237,7 +249,17 @@ Status Compactor::compact(
         std::filesystem::remove(tmp_path, ec);
         return is_ok(reopen_status) ? s : reopen_status;
     }
-    return reopen_status;
+    if (!is_ok(reopen_status)) {
+        return reopen_status;
+    }
+
+    if (!entries.empty()) {
+        index.clear();
+        for (const auto& [k, v] : new_index_entries) {
+            index.put(k, v);
+        }
+    }
+    return Status::Ok;
 }
 
 } // namespace kvdb::concurrency

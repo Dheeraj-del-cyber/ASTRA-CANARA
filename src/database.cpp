@@ -34,11 +34,25 @@ public:
         std::vector<std::vector<std::uint8_t>> ops_bytes;
         std::uint64_t total_payload_bytes = begin_bytes.size();
 
+        struct StagedOp {
+            Operation::Type type;
+            std::string key;
+            std::uint64_t val_offset;
+            std::uint64_t val_len;
+        };
+        std::vector<StagedOp> staged;
+        std::uint64_t current_file_offset = file.size() + begin_bytes.size();
+
         for (const auto& op : ops) {
             RecordType rtype = (op.type == Operation::Type::Put) ? RecordType::Put : RecordType::Delete;
             storage::Frame f{rtype, tx_id, op.key, op.value};
             auto b = storage::serialize_frame(f);
             total_payload_bytes += b.size();
+
+            std::uint64_t val_offset = current_file_offset + storage::FRAME_HEADER_SIZE + op.key.size();
+            staged.push_back({op.type, op.key, val_offset, static_cast<std::uint64_t>(op.value.size())});
+            current_file_offset += b.size();
+
             ops_bytes.push_back(std::move(b));
         }
 
@@ -70,14 +84,11 @@ public:
         if (!is_ok(s)) return s;
 
         // Publish to in-memory index
-        for (const auto& op : ops) {
-            if (op.type == Operation::Type::Put) {
-                storage::IndexEntry entry;
-                entry.cached_value = op.value;
-                entry.value_len = op.value.size();
-                index.put(op.key, entry);
+        for (const auto& item : staged) {
+            if (item.type == Operation::Type::Put) {
+                index.put(item.key, storage::IndexEntry{item.val_offset, item.val_len, tx_id});
             } else {
-                index.remove(op.key);
+                index.remove(item.key);
             }
         }
 
@@ -140,10 +151,26 @@ Result Database::get(const std::string& key) {
     }
 
     impl_->lock_mgr.lock_shared();
-    auto entry = impl_->index.get(key);
-    if (entry.has_value()) {
-        res.status = Status::Ok;
-        res.value = entry->cached_value;
+    auto entry_opt = impl_->index.get(key);
+    if (entry_opt.has_value()) {
+        const auto& entry = *entry_opt;
+        if (entry.val_len == 0) {
+            res.status = Status::Ok;
+            res.value.clear();
+        } else {
+            res.value.resize(static_cast<std::size_t>(entry.val_len));
+            Status s = impl_->file.read_at(
+                entry.val_file_offset,
+                reinterpret_cast<std::uint8_t*>(&res.value[0]),
+                static_cast<std::size_t>(entry.val_len)
+            );
+            if (is_ok(s)) {
+                res.status = Status::Ok;
+            } else {
+                res.status = s;
+                res.value.clear();
+            }
+        }
     } else {
         res.status = Status::NotFound;
     }
@@ -213,12 +240,22 @@ Status Database::dump(std::ostream& out) {
 
     impl_->lock_mgr.lock_shared();
     auto entries = impl_->index.get_all_entries();
-    // Deterministic lexicographical sort by key
+    // Deterministic lexicographical sort by key for deterministic dump output
     std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
         return a.first < b.first;
     });
-    for (const auto& [k, v] : entries) {
-        out << k << "=" << v.cached_value << "\n";
+
+    for (const auto& [k, entry] : entries) {
+        std::string val;
+        if (entry.val_len > 0) {
+            val.resize(static_cast<std::size_t>(entry.val_len));
+            impl_->file.read_at(
+                entry.val_file_offset,
+                reinterpret_cast<std::uint8_t*>(&val[0]),
+                static_cast<std::size_t>(entry.val_len)
+            );
+        }
+        out << k << "=" << val << "\n";
     }
     impl_->lock_mgr.unlock_shared();
     return Status::Ok;
