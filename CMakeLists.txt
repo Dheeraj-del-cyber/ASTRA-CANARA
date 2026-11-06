@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.15)
 project(kvdb VERSION 1.0.0 LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -40,6 +42,18 @@ add_executable(torture_tool
     tests/torture/oracle.cpp
 )
 target_link_libraries(torture_tool PRIVATE kvdb_core)
+
+# Additive Phase 5 runner; the existing Phase 4 torture_tool remains unchanged.
+add_executable(torture_tool_phase5
+    tests/torture/torture_phase5_main.cpp
+    tests/torture/oracle.cpp
+)
+target_link_libraries(torture_tool_phase5 PRIVATE kvdb_core Threads::Threads)
+
+add_executable(workload_generator_tests
+    tests/torture/workload_generator_test.cpp
+)
+target_link_libraries(workload_generator_tests PRIVATE kvdb_core)
 
 # Basic unit test
 add_executable(unit_tests

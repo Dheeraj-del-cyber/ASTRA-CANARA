@@ -91,6 +91,17 @@ cmake --build build -j
 
 The executable name and exact build targets should be kept consistent with the final implementation. The examples below assume the executable is named `kvdb`.
 
+## Phase 5 torture workload
+
+The additive Phase 5 runner is built as `torture_tool_phase5`, leaving the existing Phase 4 `torture_tool` target unchanged. It supports reproducible seeded workloads and concurrent workers:
+
+```bash
+./build/torture_tool_phase5 --seed 1337 --iterations 500 --threads 4
+./build/torture_tool_phase5 --mode batch --db batch-test.db --oracle batch-test.ack.log
+```
+
+The `all` mode uses the 50/30/15/5 PUT/GET/DEL/BATCH distribution. Batch mode generates batches of 1–500 operations. `--iterations` is the total number of top-level operations shared across workers.
+
 ## CLI interface
 
 The following command shape is the proposed judge-facing interface:
