@@ -422,11 +422,3 @@ Compare our torture-testing harness against the common criteria for weak test to
 ```
 
 ---
-
-### Prompt 26
-- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-07 07:24 IST
-- **Prompt:**
-```text
-Refine all prompt entries in PROMPTS.md to ensure professional technical phrasing while preserving exact chronological timestamps and dates.
-```
