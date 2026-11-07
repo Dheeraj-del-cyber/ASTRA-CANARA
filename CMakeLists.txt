@@ -20,6 +20,7 @@ add_library(kvdb_core STATIC
     src/storage/format.cpp
     src/storage/file.cpp
     src/storage/index.cpp
+    src/storage/storage_engine.cpp
     src/recovery/recovery.cpp
     src/concurrency/compactor.cpp
     src/cli/batch_parser.cpp
@@ -109,7 +110,7 @@ target_include_directories(torture_tool_phase10 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/torture
 )
-target_link_libraries(torture_tool_phase10 PRIVATE Threads::Threads)
+target_link_libraries(torture_tool_phase10 PRIVATE kvdb_core Threads::Threads)
 
 # Isolated Phase 6 child-process crash/recovery runner.
 add_executable(torture_tool_phase6
@@ -126,3 +127,9 @@ add_executable(unit_tests
     tests/torture/oracle.cpp
 )
 target_link_libraries(unit_tests PRIVATE kvdb_core)
+
+# Storage engine unit & scale tests
+add_executable(storage_tests
+    tests/unit/storage_test.cpp
+)
+target_link_libraries(storage_tests PRIVATE kvdb_core)
