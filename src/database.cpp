@@ -9,6 +9,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
 #include "crash_hook.hpp"
 #endif
@@ -23,10 +24,13 @@ public:
     storage::Index index;
     concurrency::LockManager lock_mgr;
     std::atomic<TxId> next_tx_id{1};
+    std::mutex transaction_mutex;
     bool is_open{false};
+    bool write_failed{false};
 
     Status append_transaction(const std::vector<Operation>& ops) {
         if (!is_open) return Status::NotOpen;
+        if (write_failed) return Status::IoError;
 
         TxId tx_id = next_tx_id.fetch_add(1);
 
@@ -34,7 +38,9 @@ public:
         storage::Frame begin_frame{RecordType::Begin, tx_id, "", ""};
         auto begin_bytes = storage::serialize_frame(begin_frame);
 
-        std::vector<std::vector<std::uint8_t>> ops_bytes;
+        const std::uint64_t transaction_start = file.size();
+        std::vector<std::uint8_t> transaction_bytes;
+        transaction_bytes.insert(transaction_bytes.end(), begin_bytes.begin(), begin_bytes.end());
         std::uint64_t total_payload_bytes = begin_bytes.size();
 
         struct StagedOp {
@@ -44,56 +50,66 @@ public:
             std::uint64_t val_len;
         };
         std::vector<StagedOp> staged;
-        std::uint64_t current_file_offset = file.size() + begin_bytes.size();
+        std::uint64_t current_file_offset = transaction_start + begin_bytes.size();
 
         for (const auto& op : ops) {
             RecordType rtype = (op.type == Operation::Type::Put) ? RecordType::Put : RecordType::Delete;
             storage::Frame f{rtype, tx_id, op.key, op.value};
             auto b = storage::serialize_frame(f);
             total_payload_bytes += b.size();
+            transaction_bytes.insert(transaction_bytes.end(), b.begin(), b.end());
 
             std::uint64_t val_offset = current_file_offset + storage::FRAME_HEADER_SIZE + op.key.size();
             staged.push_back({op.type, op.key, val_offset, static_cast<std::uint64_t>(op.value.size())});
             current_file_offset += b.size();
 
-            ops_bytes.push_back(std::move(b));
         }
 
+        const std::size_t operations_end = transaction_bytes.size();
         storage::Frame commit_frame{RecordType::Commit, tx_id, "", ""};
         auto commit_bytes = storage::serialize_frame(commit_frame);
         total_payload_bytes += commit_bytes.size();
+        transaction_bytes.insert(transaction_bytes.end(), commit_bytes.begin(), commit_bytes.end());
 
         // Check space capacity
         if (!concurrency::SpaceManager::has_space_for(file.size(), total_payload_bytes, config.max_bytes)) {
             return Status::NoSpace;
         }
 
-        // Append BEGIN
-        Status s = file.append(begin_bytes.data(), begin_bytes.size());
-        if (!is_ok(s)) return s;
+        const std::size_t commit_offset = operations_end;
+        const std::size_t commit_size = commit_bytes.size();
+
+        auto rollback_transaction = [&](Status failure) {
+            if (!is_ok(file.truncate(transaction_start))) {
+                write_failed = true;
+            }
+            return failure;
+        };
+
+        // Keep one encoded transaction buffer, writing each logical stage separately
+        // so crash hooks observe the matching on-disk transaction state.
+        Status s = file.append(transaction_bytes.data(), begin_bytes.size());
+        if (!is_ok(s)) return rollback_transaction(s);
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
         torture::crash_if_selected("after_begin");
 #endif
 
-        // Append Operations
-        for (const auto& b : ops_bytes) {
-            s = file.append(b.data(), b.size());
-            if (!is_ok(s)) return s;
-        }
+        const std::size_t operations_size = operations_end - begin_bytes.size();
+        s = file.append(transaction_bytes.data() + begin_bytes.size(), operations_size);
+        if (!is_ok(s)) return rollback_transaction(s);
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
         torture::crash_if_selected("after_operations");
 #endif
 
-        // Append COMMIT
-        s = file.append(commit_bytes.data(), commit_bytes.size());
-        if (!is_ok(s)) return s;
+        s = file.append(transaction_bytes.data() + commit_offset, commit_size);
+        if (!is_ok(s)) return rollback_transaction(s);
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
         torture::crash_if_selected("after_commit");
 #endif
 
         // Durable sync before updating in-memory index or reporting success
         s = file.sync();
-        if (!is_ok(s)) return s;
+        if (!is_ok(s)) return rollback_transaction(s);
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
         torture::crash_if_selected("after_sync");
 #endif
@@ -138,6 +154,7 @@ Status Database::open(const std::string& path, std::uint64_t max_bytes) {
     }
 
     impl_->next_tx_id = rec_result.committed_transactions + 1;
+    impl_->write_failed = false;
     impl_->is_open = true;
     return Status::Ok;
 }
@@ -148,6 +165,7 @@ Status Database::put(const std::string& key, const std::string& value) {
         return Status::InvalidArgument;
     }
 
+    std::lock_guard<std::mutex> transaction_lock(impl_->transaction_mutex);
     impl_->lock_mgr.lock_exclusive();
     Status s = impl_->append_transaction({{Operation::Type::Put, key, value}});
     impl_->lock_mgr.unlock_exclusive();
@@ -199,6 +217,7 @@ Status Database::remove(const std::string& key) {
         return Status::InvalidArgument;
     }
 
+    std::lock_guard<std::mutex> transaction_lock(impl_->transaction_mutex);
     impl_->lock_mgr.lock_exclusive();
     Status s = impl_->append_transaction({{Operation::Type::Delete, key, ""}});
     impl_->lock_mgr.unlock_exclusive();
@@ -220,6 +239,7 @@ Status Database::batch(const std::vector<Operation>& operations) {
         }
     }
 
+    std::lock_guard<std::mutex> transaction_lock(impl_->transaction_mutex);
     impl_->lock_mgr.lock_exclusive();
     Status s = impl_->append_transaction(operations);
     impl_->lock_mgr.unlock_exclusive();
@@ -228,6 +248,7 @@ Status Database::batch(const std::vector<Operation>& operations) {
 
 Status Database::compact() {
     if (!impl_->is_open) return Status::NotOpen;
+    std::lock_guard<std::mutex> transaction_lock(impl_->transaction_mutex);
     return concurrency::Compactor::compact(
         impl_->path,
         impl_->file,
@@ -240,14 +261,15 @@ Status Database::compact() {
 Status Database::close() {
     if (!impl_->is_open) return Status::Ok;
 
+    std::lock_guard<std::mutex> transaction_lock(impl_->transaction_mutex);
     impl_->lock_mgr.lock_exclusive();
-    impl_->file.sync();
+    Status sync_status = impl_->file.sync();
     impl_->file.close();
     impl_->index.clear();
     impl_->is_open = false;
     impl_->lock_mgr.unlock_exclusive();
 
-    return Status::Ok;
+    return sync_status;
 }
 
 Status Database::dump(std::ostream& out) {
