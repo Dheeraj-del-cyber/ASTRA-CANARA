@@ -42,12 +42,14 @@ struct Options {
     std::uint64_t max_bytes{0};
     std::uint32_t threads{4};
     std::uint32_t compact_rate{16};
+    std::uint64_t crash_occurrence{1};
     std::string db_path{"torture_phase10.db"};
     std::string oracle_path{"torture_phase10.ack.log"};
     std::string report_path;
     std::string kvdb_path;
     std::string crash_binary_path;
     std::string crash_phase;
+    std::string crash_operation;
     Mode mode{Mode::Compaction};
     bool db_path_explicit{false};
     bool oracle_path_explicit{false};
@@ -84,6 +86,8 @@ void print_usage(std::ostream& out) {
         << "  --recovery-crash                 Randomly kill during serve startup/recovery\n"
         << "  --compaction-crash               Include compaction during random crash cycles\n"
         << "  --crash-phase <name>             Hard-kill at a reported persistence phase\n"
+        << "  --crash-occurrence <int>          Pause at the Nth matching phase (default: 1)\n"
+        << "  --crash-operation <put|delete|batch> Force operation type for crash-phase tests\n"
         << "  --disk-full                      Require --max-bytes and verify NoSpace recovery\n"
         << "  --verbose                        Print every crash cycle and request phase\n"
         << "  --report <path>                  Write a JSONL ACK/crash report (new file only)\n"
@@ -184,6 +188,12 @@ bool parse_options(int argc, char* argv[], Options& options) {
                 std::cerr << "Max bytes must be an unsigned integer\n";
                 return false;
             }
+        } else if (argument == "--crash-occurrence") {
+            if (!parse_unsigned(value, options.crash_occurrence) ||
+                options.crash_occurrence == 0) {
+                std::cerr << "Crash occurrence must be a positive integer\n";
+                return false;
+            }
         } else if (argument == "--mode") {
             if (value == "compaction") options.mode = Mode::Compaction;
             else if (value == "random-crash") options.mode = Mode::RandomCrash;
@@ -209,6 +219,8 @@ bool parse_options(int argc, char* argv[], Options& options) {
         } else if (argument == "--crash-phase") {
             options.crash_phase = value;
             options.mode = Mode::RandomCrash;
+        } else if (argument == "--crash-operation") {
+            options.crash_operation = value;
         } else if (argument == "--crash-binary") {
             options.crash_binary_path = value;
         } else if (argument == "--db") {
@@ -234,6 +246,37 @@ bool parse_options(int argc, char* argv[], Options& options) {
     if (options.operations_per_worker >
         std::numeric_limits<std::uint64_t>::max() / options.threads) {
         std::cerr << "Total operations per cycle exceed the supported range\n";
+        return false;
+    }
+    if (options.crash_occurrence > 1 && options.crash_phase.empty()) {
+        std::cerr << "--crash-occurrence requires --crash-phase\n";
+        return false;
+    }
+    if (!options.crash_operation.empty() &&
+        options.crash_operation != "put" && options.crash_operation != "delete" &&
+        options.crash_operation != "batch") {
+        std::cerr << "Unsupported crash operation: " << options.crash_operation << "\n";
+        return false;
+    }
+    if (!options.crash_operation.empty() && options.crash_phase.empty()) {
+        std::cerr << "--crash-operation requires --crash-phase\n";
+        return false;
+    }
+    if (options.crash_operation == "batch" && !options.large_batches) {
+        std::cerr << "--crash-operation batch requires --large-batches\n";
+        return false;
+    }
+    if (options.crash_operation == "delete" &&
+        (options.large_values || options.large_batches)) {
+        std::cerr << "--crash-operation delete cannot be combined with large workloads\n";
+        return false;
+    }
+    if (options.disk_full && !options.crash_operation.empty()) {
+        std::cerr << "--disk-full cannot be combined with --crash-operation\n";
+        return false;
+    }
+    if (options.crash_occurrence > 1 && options.crash_operation == "delete") {
+        std::cerr << "--crash-operation delete does not support repeated batch phases\n";
         return false;
     }
     if (options.mode == Mode::RandomCrash && options.threads < 2) {
@@ -272,8 +315,19 @@ bool parse_options(int argc, char* argv[], Options& options) {
             return false;
         }
         if (options.crash_phase == "file_append_partial_write" &&
-            !options.large_values) {
-            std::cerr << "--crash-phase file_append_partial_write requires --large-values\n";
+            !options.large_values && !options.large_batches) {
+            std::cerr << "--crash-phase file_append_partial_write requires "
+                         "--large-values or --large-batches\n";
+            return false;
+        }
+        if (options.crash_occurrence > 1 &&
+            options.crash_phase != "transaction_operation_written") {
+            std::cerr << "--crash-occurrence greater than one is supported only for "
+                         "transaction_operation_written\n";
+            return false;
+        }
+        if (options.crash_occurrence > 1 && !options.large_batches) {
+            std::cerr << "--crash-occurrence greater than one requires --large-batches\n";
             return false;
         }
         if (options.disk_full || options.recovery_crash) {
@@ -1085,11 +1139,21 @@ std::string describe_request(const Request& request) {
 bool make_request(torture::WorkloadGenerator& generator, std::mt19937_64& compaction_rng,
                   std::uint32_t compact_rate, std::uint32_t worker_id,
                   std::uint64_t operation_index, std::uint64_t nonce,
+                  std::uint64_t cycle, const std::string& crash_operation,
                   bool allow_compaction, bool large_values, bool large_batches,
-                  bool force_disk_full, bool force_compaction,
+                  bool large_batch_partial_write, bool force_disk_full,
+                  bool force_compaction,
                   Request& request, std::string& error) {
     request.generated = generator.next();
-    if (force_disk_full) {
+    if (crash_operation == "delete") {
+        request.generated = {torture::GeneratedOperation::Type::Delete,
+            "torture_bootstrap_" + std::to_string(cycle), {}, {}};
+    } else if (crash_operation == "put") {
+        request.generated = {torture::GeneratedOperation::Type::Put,
+            "crash_target_" + std::to_string(worker_id) + "_" +
+                std::to_string(operation_index),
+            "crash_target_value_" + std::to_string(cycle), {}};
+    } else if (force_disk_full) {
         if (operation_index % 2 == 0) {
             request.generated = {torture::GeneratedOperation::Type::Put,
                 "disk_full_" + std::to_string(worker_id) + "_" +
@@ -1120,8 +1184,10 @@ bool make_request(torture::WorkloadGenerator& generator, std::mt19937_64& compac
             const auto key_index = static_cast<std::uint64_t>(i % 1024);
             operations.push_back({kvdb::Operation::Type::Put,
                 "large_batch_key_" + std::to_string(key_index),
-                "large_batch_value_" + std::to_string(operation_index) + "_" +
-                    std::to_string(i)});
+                i == 0 && large_batch_partial_write
+                    ? std::string(1024U * 1024U, 'B')
+                    : "large_batch_value_" + std::to_string(operation_index) + "_" +
+                          std::to_string(i)});
         }
         operations.push_back({kvdb::Operation::Type::Put, "batch_order_key", "before_delete"});
         operations.push_back({kvdb::Operation::Type::Delete, "batch_order_key", {}});
@@ -1460,7 +1526,10 @@ public:
         if (options_.compaction_crash || phase_crash) {
             const std::string& target = options_.crash_phase.empty()
                 ? compaction_target_ : options_.crash_phase;
-            if (!server_.write_line("ARM " + target, error)) return false;
+            if (!server_.write_line("ARM " + target + " " +
+                                    std::to_string(options_.crash_occurrence), error)) {
+                return false;
+            }
             while (true) {
                 eof = false;
                 if (!server_.read_line(response, 30s, eof, error) || eof) {
@@ -1782,7 +1851,8 @@ private:
         const std::string event = "{\"event\":\"crash\",\"timestamp_unix_ms\":" +
             std::to_string(timestamp) + ",\"cycle\":" + std::to_string(cycle_) +
             ",\"operation_id\":\"" + json_escape(op_id) + "\",\"phase\":\"" +
-            json_escape(phase) + "\"}";
+            json_escape(phase) + "\",\"phase_occurrence\":" +
+            std::to_string(options_.crash_occurrence) + "}";
         if (!report_.write(event, error)) {
             failed_.store(true);
             fatal_error_ = error;
@@ -1791,7 +1861,8 @@ private:
         }
         std::cout << "[Torture] cycle=" << cycle_ << " crash_timestamp_unix_ms="
                   << timestamp << " op_id=" << (op_id.empty() ? "none" : op_id)
-                  << " phase=" << phase << "\n";
+                  << " phase=" << phase
+                  << " occurrence=" << options_.crash_occurrence << "\n";
         state_changed_.notify_all();
         return true;
     }
@@ -2008,7 +2079,8 @@ bool run_cycle(const Options& options, AckOracle& oracle, std::uint64_t cycle,
                 std::string operation_error;
                 if (!make_request(*generators[worker_id], compaction_rngs[worker_id],
                                   options.compact_rate, worker_id, operation_index,
-                                  nonce, true, false, false, false, false,
+                                  nonce, cycle, {}, true, false, false, false,
+                                  false, false,
                                   request, operation_error)) {
                     errors[worker_id] = operation_error;
                     failed.store(true);
@@ -2095,8 +2167,12 @@ bool run_random_crash_cycle(
                 std::string operation_error;
                 if (!make_request(*generators[worker_id], compaction_rngs[worker_id],
                                   options.compact_rate, worker_id, operation_index,
-                                  nonce, options.compaction_crash, options.large_values,
-                                  options.large_batches, options.disk_full,
+                                  nonce, cycle, options.crash_operation,
+                                  options.compaction_crash, options.large_values,
+                                  options.large_batches,
+                                  options.large_batches &&
+                                      options.crash_phase == "file_append_partial_write",
+                                  options.disk_full,
                                   (options.compaction_crash ||
                                    options.crash_phase.rfind("compaction_", 0) == 0) &&
                                       worker_id == 0 &&

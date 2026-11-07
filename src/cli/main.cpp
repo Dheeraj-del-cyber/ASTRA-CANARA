@@ -299,7 +299,22 @@ int main(int argc, char* argv[]) {
 
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
                 if (op == "ARM") {
-                    torture::arm_test_phase_pause(op_id);
+                    std::uint64_t occurrence = 1;
+                    std::string occurrence_text;
+                    if (iss >> occurrence_text) {
+                        const auto parsed = std::from_chars(
+                            occurrence_text.data(),
+                            occurrence_text.data() + occurrence_text.size(),
+                            occurrence);
+                        if (parsed.ec != std::errc{} ||
+                            parsed.ptr != occurrence_text.data() + occurrence_text.size() ||
+                            occurrence == 0) {
+                            std::cout << "ERR " << op_id << " invalid_occurrence\n";
+                            std::cout.flush();
+                            continue;
+                        }
+                    }
+                    torture::arm_test_phase_pause(op_id, occurrence);
                     std::cout << "ARMED " << op_id << "\n";
                 } else
 #endif
