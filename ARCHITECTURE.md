@@ -1,5 +1,7 @@
 # Architecture & Storage Design
 
+![KVDB System Architecture Diagram](docs/architecture.jpg)
+
 ## 1. System Overview & Architecture Diagram
 
 ```text

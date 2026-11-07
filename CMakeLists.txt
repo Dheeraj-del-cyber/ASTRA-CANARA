@@ -23,6 +23,7 @@ add_library(kvdb_core STATIC
     src/storage/index.cpp
     src/storage/storage_engine.cpp
     src/recovery/recovery.cpp
+    src/recovery/log_scanner.cpp
     src/concurrency/compactor.cpp
     src/cli/batch_parser.cpp
     src/database.cpp
@@ -75,6 +76,47 @@ add_executable(oracle_tests
 )
 target_link_libraries(oracle_tests PRIVATE kvdb_core Threads::Threads)
 
+# Test-only CLI with deterministic transaction/ACK crash hooks.
+add_executable(kvdb_crash_test
+    src/cli/main.cpp
+    src/database.cpp
+    src/storage/format.cpp
+    src/storage/file.cpp
+    src/storage/index.cpp
+    src/recovery/recovery.cpp
+    src/concurrency/compactor.cpp
+    src/cli/batch_parser.cpp
+)
+target_include_directories(kvdb_crash_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/torture
+)
+target_compile_definitions(kvdb_crash_test PRIVATE KVDB_ENABLE_CRASH_HOOKS)
+
+# Phase 8 deterministic crash-point verification executable.
+add_executable(torture_tool_phase8
+    tests/torture/torture_phase8_main.cpp
+    tests/torture/child_process.cpp
+    tests/torture/oracle.cpp
+)
+target_include_directories(torture_tool_phase8 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/torture
+)
+target_link_libraries(torture_tool_phase8 PRIVATE Threads::Threads)
+
+# Phase 10 compaction-under-load crash/recovery runner.
+add_executable(torture_tool_phase10
+    tests/torture/torture_phase10_main.cpp
+    tests/torture/child_process.cpp
+    tests/torture/oracle.cpp
+)
+target_include_directories(torture_tool_phase10 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/torture
+)
+target_link_libraries(torture_tool_phase10 PRIVATE Threads::Threads)
+
 # Isolated Phase 6 child-process crash/recovery runner.
 add_executable(torture_tool_phase6
     tests/torture/torture_phase6_main.cpp
@@ -95,3 +137,16 @@ add_executable(storage_tests
     tests/unit/storage_test.cpp
 )
 target_link_libraries(storage_tests PRIVATE kvdb_core)
+
+# Recovery engine unit tests
+add_executable(recovery_tests
+    tests/unit/recovery_test.cpp
+)
+target_link_libraries(recovery_tests PRIVATE kvdb_core)
+
+# Phase 1: Log Scanner unit test
+add_executable(log_scanner_test
+    tests/unit/log_scanner_test.cpp
+)
+target_link_libraries(log_scanner_test PRIVATE kvdb_core)
+
