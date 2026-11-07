@@ -125,6 +125,14 @@ add_executable(torture_tool_phase6
 )
 target_link_libraries(torture_tool_phase6 PRIVATE kvdb_core)
 
+# Official judge torture tool matching problem statement
+add_executable(torture
+    tests/torture/torture_phase6_main.cpp
+    tests/torture/child_process.cpp
+    tests/torture/oracle.cpp
+)
+target_link_libraries(torture PRIVATE kvdb_core)
+
 # Basic unit test
 add_executable(unit_tests
     tests/unit/basic_test.cpp

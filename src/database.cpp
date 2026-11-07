@@ -22,12 +22,14 @@ public:
     storage::File file;
     storage::Index index;
     concurrency::LockManager lock_mgr;
+    std::mutex write_mutex;
     std::atomic<TxId> next_tx_id{1};
     bool is_open{false};
 
     Status append_transaction(const std::vector<Operation>& ops) {
         if (!is_open) return Status::NotOpen;
 
+        std::lock_guard<std::mutex> append_lock(write_mutex);
         TxId tx_id = next_tx_id.fetch_add(1);
 
         // Pre-encode frames to calculate size
@@ -367,6 +369,11 @@ Status Database::check_file(const std::string& path) {
 
 bool Database::is_open() const {
     return impl_->is_open;
+}
+
+std::size_t Database::key_count() const {
+    if (!impl_ || !impl_->is_open) return 0;
+    return impl_->index.size();
 }
 
 } // namespace kvdb

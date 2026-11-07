@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
+#include <mutex>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -20,6 +21,7 @@ namespace kvdb::storage {
 struct File::Impl {
     std::string path;
     std::uint64_t file_size{0};
+    mutable std::mutex io_mutex;
 #if defined(_WIN32)
     HANDLE handle{INVALID_HANDLE_VALUE};
 #else
@@ -98,6 +100,7 @@ Status File::open(const std::string& path, bool create_if_missing) {
 }
 
 Status File::close() {
+    std::lock_guard<std::mutex> lock(impl_->io_mutex);
 #if defined(_WIN32)
     if (impl_->handle != INVALID_HANDLE_VALUE) {
         CloseHandle(impl_->handle);
@@ -118,18 +121,20 @@ Status File::append(const std::uint8_t* data, std::size_t size) {
     if (!is_open()) return Status::NotOpen;
     if (size == 0) return Status::Ok;
 
+    std::lock_guard<std::mutex> lock(impl_->io_mutex);
 #if defined(_WIN32)
     std::size_t total_written = 0;
     while (total_written < size) {
         DWORD to_write = static_cast<DWORD>(std::min<std::size_t>(size - total_written, 64 * 1024 * 1024));
         DWORD written = 0;
 
-        OVERLAPPED ov{};
-        std::uint64_t offset = impl_->file_size + total_written;
-        ov.Offset = static_cast<DWORD>(offset & 0xFFFFFFFF);
-        ov.OffsetHigh = static_cast<DWORD>((offset >> 32) & 0xFFFFFFFF);
+        LARGE_INTEGER li;
+        li.QuadPart = static_cast<LONGLONG>(impl_->file_size + total_written);
+        if (!SetFilePointerEx(impl_->handle, li, nullptr, FILE_BEGIN)) {
+            return Status::IoError;
+        }
 
-        if (!WriteFile(impl_->handle, data + total_written, to_write, &written, &ov)) {
+        if (!WriteFile(impl_->handle, data + total_written, to_write, &written, nullptr)) {
             DWORD err = GetLastError();
             if (err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL) {
                 return Status::NoSpace;
@@ -169,6 +174,8 @@ Status File::append(const std::uint8_t* data, std::size_t size) {
 Status File::read_at(std::uint64_t offset, std::uint8_t* buffer, std::size_t size) const {
     if (!is_open()) return Status::NotOpen;
     if (size == 0) return Status::Ok;
+
+    std::lock_guard<std::mutex> lock(impl_->io_mutex);
     if (offset + size > impl_->file_size) {
         return Status::IoError; // Attempt to read past EOF
     }
@@ -179,12 +186,13 @@ Status File::read_at(std::uint64_t offset, std::uint8_t* buffer, std::size_t siz
         DWORD to_read = static_cast<DWORD>(std::min<std::size_t>(size - total_read, 64 * 1024 * 1024));
         DWORD bytes_read = 0;
 
-        OVERLAPPED ov{};
-        std::uint64_t cur_offset = offset + total_read;
-        ov.Offset = static_cast<DWORD>(cur_offset & 0xFFFFFFFF);
-        ov.OffsetHigh = static_cast<DWORD>((cur_offset >> 32) & 0xFFFFFFFF);
+        LARGE_INTEGER li;
+        li.QuadPart = static_cast<LONGLONG>(offset + total_read);
+        if (!SetFilePointerEx(impl_->handle, li, nullptr, FILE_BEGIN)) {
+            return Status::IoError;
+        }
 
-        if (!ReadFile(impl_->handle, buffer + total_read, to_read, &bytes_read, &ov)) {
+        if (!ReadFile(impl_->handle, buffer + total_read, to_read, &bytes_read, nullptr)) {
             return Status::IoError;
         }
         if (bytes_read == 0) {
@@ -216,6 +224,7 @@ Status File::read_at(std::uint64_t offset, std::uint8_t* buffer, std::size_t siz
 Status File::sync() {
     if (!is_open()) return Status::NotOpen;
 
+    std::lock_guard<std::mutex> lock(impl_->io_mutex);
 #if defined(_WIN32)
     if (!FlushFileBuffers(impl_->handle)) {
         return Status::IoError;
@@ -236,6 +245,7 @@ Status File::sync() {
 Status File::truncate(std::uint64_t new_size) {
     if (!is_open()) return Status::NotOpen;
 
+    std::lock_guard<std::mutex> lock(impl_->io_mutex);
 #if defined(_WIN32)
     LARGE_INTEGER li;
     li.QuadPart = static_cast<LONGLONG>(new_size);
@@ -246,17 +256,28 @@ Status File::truncate(std::uint64_t new_size) {
         return Status::IoError;
     }
     impl_->file_size = new_size;
-    return sync();
+    if (!FlushFileBuffers(impl_->handle)) {
+        return Status::IoError;
+    }
+    return Status::Ok;
 #else
     if (::ftruncate(impl_->fd, static_cast<off_t>(new_size)) != 0) {
         return Status::IoError;
     }
     impl_->file_size = new_size;
-    return sync();
+    #if defined(__APPLE__)
+        if (::fcntl(impl_->fd, F_FULLFSYNC) != 0) return Status::IoError;
+    #else
+        if (::fdatasync(impl_->fd) != 0) {
+            if (::fsync(impl_->fd) != 0) return Status::IoError;
+        }
+    #endif
+    return Status::Ok;
 #endif
 }
 
 std::uint64_t File::size() const {
+    std::lock_guard<std::mutex> lock(impl_->io_mutex);
     return impl_->file_size;
 }
 

@@ -40,6 +40,7 @@ public:
 
     // Query state
     bool is_open() const;
+    std::size_t key_count() const;
 
 private:
     std::unique_ptr<DatabaseImpl> impl_;

@@ -1,5 +1,6 @@
 #include "kvdb/database.hpp"
 #include "kvdb/cli/batch_parser.hpp"
+#include <chrono>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -78,12 +79,15 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            auto start_t = std::chrono::high_resolution_clock::now();
             kvdb::Status s = db.open(db_path, max_bytes);
+            auto end_t = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> elapsed = end_t - start_t;
             if (!kvdb::is_ok(s)) {
                 std::cerr << "Error: " << kvdb::status_to_string(s) << "\n";
                 return EXIT_CLI_ERROR;
             }
-            std::cout << "OK\n";
+            std::cout << "Keys: " << db.key_count() << ", Recovery time: " << elapsed.count() << " ms\n";
             db.close();
             return EXIT_CLI_SUCCESS;
         }
@@ -92,7 +96,7 @@ int main(int argc, char* argv[]) {
         if (command == "check") {
             kvdb::Status s = kvdb::Database::check_file(db_path);
             if (kvdb::is_ok(s)) {
-                std::cout << "INTEGRITY_OK\n";
+                std::cout << "OK\n";
                 return EXIT_CLI_SUCCESS;
             } else {
                 std::cerr << "INTEGRITY_FAILED: " << kvdb::status_to_string(s) << "\n";
@@ -147,7 +151,7 @@ int main(int argc, char* argv[]) {
             db.close();
 
             if (res.status == kvdb::Status::NotFound) {
-                std::cerr << "NOT_FOUND\n";
+                std::cout << "NOTFOUND\n";
                 return EXIT_CLI_NOT_FOUND;
             } else if (!kvdb::is_ok(res.status)) {
                 std::cerr << "Error: " << kvdb::status_to_string(res.status) << "\n";
