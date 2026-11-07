@@ -432,3 +432,14 @@ Resolve merge conflicts in Pull Request #11 (feat(recovery): Phase 2 - harden du
 ```
 
 ---
+
+### Prompt 27
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-07 09:33 IST
+- **Prompt:**
+```text
+Update README.md comprehensively to production quality, emphasizing the system architecture, component data flow, Bitcask indexing design, zero-dependency binary formats, exact CLI command grammar, independent torture harness usage, and build/verification instructions.
+```
+
+---
+
