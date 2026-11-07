@@ -156,6 +156,41 @@ void test_truncates_corrupt_tail_but_rejects_mid_log_corruption() {
     std::remove(middle_path.c_str());
 }
 
+void test_rejects_mid_log_corruption_before_chunk_boundary_commit() {
+    constexpr std::size_t scan_chunk_size = 1024 * 1024;
+    const std::string path = "recovery_chunk_boundary_commit_test.db";
+    std::remove(path.c_str());
+
+    File file;
+    assert(is_ok(file.open(path, true)));
+    append_header(file);
+    append_transaction(file, 1, {{RecordType::Put, 1, "before", "ok"}});
+    const std::uint64_t committed_size = file.size();
+
+    auto later_begin = serialize_frame(Frame{RecordType::Begin, 2, "", ""});
+    auto later_put = serialize_frame(Frame{RecordType::Put, 2, "after", "valid"});
+    const std::size_t commit_offset = scan_chunk_size - 16;
+    assert(commit_offset > later_begin.size() + later_put.size());
+    std::vector<std::uint8_t> corrupt_gap(
+        commit_offset - later_begin.size() - later_put.size(), 0);
+    assert(is_ok(file.append(corrupt_gap.data(), corrupt_gap.size())));
+    assert(is_ok(file.append(later_begin.data(), later_begin.size())));
+    assert(is_ok(file.append(later_put.data(), later_put.size())));
+    append_frame(file, RecordType::Commit, 2);
+    const std::uint64_t original_size = file.size();
+
+    Index index;
+    const auto stats = recovery::RecoveryEngine::recover(file, index);
+    assert(stats.status == Status::Corruption);
+    assert(file.size() == original_size);
+    assert(index.contains("before"));
+    assert(!index.contains("after"));
+    assert(committed_size < file.size());
+
+    assert(is_ok(file.close()));
+    std::remove(path.c_str());
+}
+
 void test_reports_truncation_sync_failure() {
     const std::string path = "recovery_sync_failure_test.db";
     std::remove(path.c_str());
@@ -206,6 +241,7 @@ int main() {
     test_replays_only_committed_transactions();
     test_truncates_uncommitted_and_torn_tail();
     test_truncates_corrupt_tail_but_rejects_mid_log_corruption();
+    test_rejects_mid_log_corruption_before_chunk_boundary_commit();
     test_reports_truncation_sync_failure();
     test_reports_empty_header_sync_failure();
     std::cout << "[Recovery Test] Replay, tail handling, and I/O failure tests passed.\n";
