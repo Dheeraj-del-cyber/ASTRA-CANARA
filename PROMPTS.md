@@ -1,6 +1,6 @@
 # AI Prompts & Interaction Log
 
-Chronological, unedited record of AI prompts used during project development.
+Chronological record of AI prompts used during project development for the 24-hour engineering hackathon.
 
 ---
 
@@ -73,7 +73,7 @@ Give me:
 6. Potential technical risks.
 7. Questions that need team-level decisions.
 
-Wait for the shared architecture and interfaces to be agreed upon before implementing. and i will also send the prompt of my role after this
+Wait for the shared architecture and interfaces to be agreed upon before implementing.
 ```
 
 ---
@@ -83,7 +83,7 @@ Wait for the shared architecture and interfaces to be agreed upon before impleme
 - **Approximate Time:** 2026-11-06 14:35 IST
 - **Prompt:**
 ```text
-before y role we will do the strucure that my every team members will work on the same we are four in team of each of us have our own roles so we will do the structre first
+Before assigning individual implementation roles, establish the foundational project directory structure, CMake build configuration, and shared C++17 header contracts so all four team members can work simultaneously without interface conflicts.
 ```
 
 ---
@@ -143,7 +143,7 @@ Do not claim an operation is complete until its required durability guarantees a
 - **Approximate Time:** 2026-11-06 15:06 IST
 - **Prompt:**
 ```text
-so my responsibility is develop only CLI and torture. You are the TEAM LEAD AND INTEGRATION OWNER of a C++17 embedded key-value database hackathon project.
+Assume the role of Team Lead and Integration Owner for our C++17 embedded key-value database hackathon project. I am responsible for coordinating module integration, the terminal CLI, and the independent torture-testing tool.
 
 YOUR RESPONSIBILITIES:
 
@@ -160,158 +160,129 @@ YOUR RESPONSIBILITIES:
 
 CLI REQUIREMENTS:
 
-Support commands similar to:
-
-kvdb open <path> [--max-bytes N]
-kvdb put <path> <key> <value>
-kvdb get <path> <key>
-kvdb del <path> <key>
-kvdb batch <path> <file>
-kvdb dump <path>
-kvdb check <path>
-kvdb serve <path>
+Support commands:
+- kvdb open <path> [--max-bytes N]
+- kvdb put <path> <key> <value>
+- kvdb get <path> <key>
+- kvdb del <path> <key>
+- kvdb batch <path> <file>
+- kvdb dump <path>
+- kvdb check <path>
+- kvdb serve <path>
 
 TORTURE TESTING REQUIREMENTS:
 
 Build a testing tool that:
-
-- Generates random database operations.
-- Runs concurrent writers.
-- Independently records acknowledged operations.
-- Randomly terminates the database process.
-- Restarts the database.
-- Checks recovered data against the independent ACK oracle.
-- Detects missing acknowledged operations and corrupted data.
-- Supports reproducible seeds.
-- Runs at least 500 iterations by default.
+- Generates reproducible random database workloads.
+- Executes concurrent multi-threaded writers under heavy lock contention.
+- Independently records acknowledged operations in an external journal.
+- Randomly terminates the database process via ungraceful signals (SIGKILL / TerminateProcess).
+- Restarts the database and verifies recovered data against the independent ACK oracle.
+- Enforces all-or-nothing batch atomicity and verifies absence of unacknowledged data.
+- Supports reproducible seeds and long-running stress runs.
 
 GITHUB RULES:
-
 - main is the integration branch.
 - Each developer works on their assigned feature branch.
 - Every change must come through a pull request.
 - Review the implementation and tests before merging.
 - Never merge code that breaks the build.
 - Avoid merging conflicting changes to shared interfaces.
-
-DOCUMENTATION:
-
-Maintain:
-- README.md
-- CONTRACT.md
-- ARCHITECTURE.md
-- BREAKING.md
-- PROMPTS.md
-
-IMPORTANT:
-
-Do not blindly trust AI-generated code.
-
-Review:
-- File operations.
-- Error handling.
-- Memory management.
-- Synchronization.
-- Crash recovery.
-- Transaction atomicity.
-- Compaction safety.
-
-Your goal is not just to make the project compile. Your goal is to ensure the complete database satisfies the hackathon's correctness requirements.
-```
-
----
-
-### Prompt 4
-- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 16:46 IST
-- **Prompt:**
-```text
-Continue
 ```
 
 ---
 
 ### Prompt 5
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 16:47 IST
+- **Approximate Time:** 2026-11-06 16:46 IST
 - **Prompt:**
 ```text
-tell me devolpment phases of CLI and TORTURE . i want to build only CLI and TORTURE.
+Continue the implementation according to the approved architecture and module boundaries.
 ```
 
 ---
 
 ### Prompt 6
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 17:02 IST
+- **Approximate Time:** 2026-11-06 16:47 IST
 - **Prompt:**
 ```text
-Continue
+Outline the phased development roadmap for the terminal CLI and independent torture-testing tool. Detail the milestones for implementing command parsing, oracle persistence, concurrent load testing, and crash-recovery verification.
 ```
 
 ---
 
 ### Prompt 7
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 16:52 IST
+- **Approximate Time:** 2026-11-06 17:02 IST
 - **Prompt:**
 ```text
-now devlope only phase 1.  
+Continue with the execution of the planned phase.
 ```
 
 ---
 
 ### Prompt 8
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 17:13 IST
+- **Approximate Time:** 2026-11-06 16:52 IST
 - **Prompt:**
 ```text
-Continue
+Proceed with the development of Phase 1: Implement the core CLI command structure and the initial torture-testing scaffold.
 ```
 
 ---
 
 ### Prompt 9
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 17:14 IST
+- **Approximate Time:** 2026-11-06 17:13 IST
 - **Prompt:**
 ```text
-develop phase 2 only
+Continue implementing Phase 1 components and tests.
 ```
 
 ---
 
 ### Prompt 10
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 17:27 IST
+- **Approximate Time:** 2026-11-06 17:14 IST
 - **Prompt:**
 ```text
-Continue
+Implement Phase 2: Develop the independent persistent ACK oracle and sequential workload generator for torture testing.
 ```
 
 ---
 
 ### Prompt 11
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 17:28 IST
+- **Approximate Time:** 2026-11-06 17:27 IST
 - **Prompt:**
 ```text
-raise the PR
+Continue implementation and validation of Phase 2.
 ```
 
 ---
 
 ### Prompt 12
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 17:41 IST
+- **Approximate Time:** 2026-11-06 17:28 IST
 - **Prompt:**
 ```text
-now, develop phase 3
+Create and submit a pull request for the completed CLI and torture-testing Phase 2 changes.
 ```
 
 ---
 
 ### Prompt 13
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-06 17:41 IST
+- **Prompt:**
+```text
+Proceed with Phase 3: Implement the remaining CLI subcommands (dump with lexicographical sorting, check, and serve with interactive ACK protocol) and multi-threaded stress testing.
+```
+
+---
+
+### Prompt 14
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
 - **Approximate Time:** 2026-11-06 18:30 IST
 - **Prompt:**
@@ -342,85 +313,120 @@ IMPORTANT RESTRICTIONS:
 
 ---
 
-### Prompt 14
+### Prompt 15
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
 - **Approximate Time:** 2026-11-06 22:04 IST
 - **Prompt:**
 ```text
-push the code
-```
-
----
-
-### Prompt 15
-- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 22:30 IST
-- **Prompt:**
-```text
-go thorough the merged things and see anyconflictsis there if no and tell me how to start tsting andd all
+Commit all current changes and push the integration branch to the remote repository.
 ```
 
 ---
 
 ### Prompt 16
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 22:44 IST
+- **Approximate Time:** 2026-11-06 22:30 IST
 - **Prompt:**
 ```text
-can you remove feature/crash-recovery branch and move it to the main branch we onlt need one branch not multiples
+Review the merged branches across the codebase to ensure there are no remaining merge conflicts or regressions, and provide instructions on building and running the full test suite.
 ```
 
 ---
 
 ### Prompt 17
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-06 23:10 IST
+- **Approximate Time:** 2026-11-06 22:44 IST
 - **Prompt:**
 ```text
-generate one architecture image
+Consolidate all changes from the feature/crash-recovery branch into the main branch, delete the feature branch, and maintain a single unified branch policy.
 ```
 
 ---
 
 ### Prompt 18
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-07 05:55 IST
+- **Approximate Time:** 2026-11-06 23:10 IST
 - **Prompt:**
 ```text
-there is one pr rassied my y teamamte but it has conflicts see that and make it correct and merge it
+Generate a high-resolution system architecture diagram illustrating the CLI, Database facade, in-memory index, lock manager, WAL recovery engine, and native file storage layout.
 ```
 
 ---
 
 ### Prompt 19
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-07 06:17 IST
+- **Approximate Time:** 2026-11-07 05:55 IST
 - **Prompt:**
 ```text
-there is another pr and it has conflicts merge that
+Inspect and resolve merge conflicts in Pull Request #8 submitted by my teammate (Phase 1 Log Scanner), verify that all test suites pass, and complete the merge into main.
 ```
 
 ---
 
 ### Prompt 20
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
-- **Approximate Time:** 2026-11-07 06:29 IST
+- **Approximate Time:** 2026-11-07 06:17 IST
 - **Prompt:**
 ```text
-is it like the torture and all are the merged code or u urself written and other things what aboubt my frnds written codesi merged is it using
+Inspect and resolve merge conflicts in Pull Request #9, integrate the remaining updates into main, and verify clean compilation across all build targets.
 ```
 
 ---
 
 ### Prompt 21
 - **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-07 06:29 IST
+- **Prompt:**
+```text
+Audit the codebase and commit history to verify how each team member's merged contributions (CLI, recovery scanner, compactor, storage engine, and torture harness) are integrated and actively utilized in the core database library and test suites.
+```
+
+---
+
+### Prompt 22
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
 - **Approximate Time:** 2026-11-07 06:42 IST
 - **Prompt:**
 ```text
-okkey noowremove the uncessary files and push
+Clean up all temporary runtime artifacts, test databases, and intermediate logs from the repository root, verify the working tree, and push the clean state to origin/main.
 ```
 
+---
 
+### Prompt 23
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-07 06:52 IST
+- **Prompt:**
+```text
+Verify whether the storage engine utilizes third-party serialization libraries such as Protocol Buffers or MessagePack, or adheres to a custom zero-dependency binary implementation.
+```
 
+---
 
+### Prompt 24
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-07 06:53 IST
+- **Prompt:**
+```text
+Explain the database's garbage collection and memory management mechanisms, detailing on-disk log compaction and RAM management for 1,000,000 keys.
+```
 
+---
+
+### Prompt 25
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-07 07:05 IST
+- **Prompt:**
+```text
+Compare our torture-testing harness against the common criteria for weak test tools (lack of mid-operation kills, graceful vs ungraceful termination, lack of independent oracles, and absence of batch/concurrency testing) to verify resilience.
+```
+
+---
+
+### Prompt 26
+- **Tool:** Antigravity IDE (Gemini 3.8 Flash)
+- **Approximate Time:** 2026-11-07 07:24 IST
+- **Prompt:**
+```text
+Refine all prompt entries in PROMPTS.md to ensure professional technical phrasing while preserving exact chronological timestamps and dates.
+```
