@@ -75,7 +75,11 @@ RecoveryStats RecoveryEngine::recover(storage::File& file, storage::Index& index
             stats.status = s;
             return stats;
         }
-        file.sync();
+        s = file.sync();
+        if (!is_ok(s)) {
+            stats.status = s;
+            return stats;
+        }
         stats.valid_bytes = hdr_bytes.size();
         stats.status = Status::Ok;
         stats.clean_shutdown = true;
@@ -257,8 +261,16 @@ RecoveryStats RecoveryEngine::recover(storage::File& file, storage::Index& index
         // Safe tail truncation: truncate uncommitted/torn frames at physical tail
         stats.truncated_bytes = file_len - last_committed_offset;
         stats.uncommitted_transactions = in_tx ? 1 : 0;
-        file.truncate(last_committed_offset);
-        file.sync();
+        s = file.truncate(last_committed_offset);
+        if (!is_ok(s)) {
+            stats.status = s;
+            return stats;
+        }
+        s = file.sync();
+        if (!is_ok(s)) {
+            stats.status = s;
+            return stats;
+        }
         stats.clean_shutdown = false;
     } else {
         stats.clean_shutdown = true;
