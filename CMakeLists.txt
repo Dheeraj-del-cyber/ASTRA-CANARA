@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 project(kvdb VERSION 1.0.0 LANGUAGES CXX)
 
 find_package(Threads REQUIRED)
+include(CTest)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,6 +51,18 @@ add_executable(torture_tool_phase5
     tests/torture/oracle.cpp
 )
 target_link_libraries(torture_tool_phase5 PRIVATE kvdb_core Threads::Threads)
+if(BUILD_TESTING)
+    add_test(
+        NAME torture_tool_phase5_concurrency
+        COMMAND torture_tool_phase5
+            --seed 1337
+            --iterations 500
+            --threads 4
+            --reset
+            --db phase5_concurrency_test.db
+            --oracle phase5_concurrency_test.ack.log
+    )
+endif()
 
 add_executable(workload_generator_tests
     tests/torture/workload_generator_test.cpp
