@@ -161,7 +161,7 @@ bool get_database_state(const Options& options, const std::string& db_path,
         error = "cycle " + std::to_string(cycle) + " integrity check process failed: " + error;
         return false;
     }
-    if (exit_code != 0 || output.size() != 1 || output.front() != "INTEGRITY_OK") {
+    if (exit_code != 0 || output.size() != 1 || (output.front() != "OK" && output.front() != "INTEGRITY_OK")) {
         error = "cycle " + std::to_string(cycle) + " integrity check failed";
         if (!output.empty()) error += ": " + output.front();
         return false;

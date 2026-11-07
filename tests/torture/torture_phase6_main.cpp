@@ -14,6 +14,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -24,7 +25,10 @@ using namespace std::chrono_literals;
 enum class Mode {
     All,
     Batch,
-    Crash
+    Crash,
+    LargeValues,
+    Compaction,
+    RecoveryCrash
 };
 
 struct Options {
@@ -44,7 +48,7 @@ void print_usage(std::ostream& out) {
         << "  --db <path>          Database path (default: torture_phase6.db)\n"
         << "  --oracle <path>      ACK journal path (default: torture_phase6.ack.log)\n"
         << "  --kvdb <path>        kvdb executable (default: beside this executable)\n"
-        << "  --mode <all|batch|crash> Workload selection (default: all)\n"
+        << "  --mode <all|batch|crash|large-values|compaction|recovery-crash> Workload selection (default: all)\n"
         << "  --reset              Remove the specified DB and oracle before starting\n"
         << "  --help               Show this help\n";
 }
@@ -87,6 +91,9 @@ bool parse_options(int argc, char* argv[], Options& options) {
             if (value == "all") options.mode = Mode::All;
             else if (value == "batch") options.mode = Mode::Batch;
             else if (value == "crash") options.mode = Mode::Crash;
+            else if (value == "large-values") options.mode = Mode::LargeValues;
+            else if (value == "compaction") options.mode = Mode::Compaction;
+            else if (value == "recovery-crash") options.mode = Mode::RecoveryCrash;
             else {
                 std::cerr << "Unsupported mode: " << value << "\n";
                 return false;
@@ -160,7 +167,7 @@ bool check_database(const Options& options, std::uint64_t cycle, std::string& er
         error = "cycle " + std::to_string(cycle) + " integrity-check process failed: " + error;
         return false;
     }
-    if (exit_code != 0 || output.size() != 1 || output.front() != "INTEGRITY_OK") {
+    if (exit_code != 0 || output.size() != 1 || (output.front() != "OK" && output.front() != "INTEGRITY_OK")) {
         error = "cycle " + std::to_string(cycle) + " integrity check failed (exit " +
             std::to_string(exit_code) + ")";
         if (!output.empty()) error += ": " + output.front();
@@ -466,7 +473,10 @@ int main(int argc, char* argv[]) {
     std::cout << "[Torture] Phase 6 seed=" << options.seed
               << " crash_cycles=" << options.iterations
               << " mode=" << (options.mode == Mode::All ? "all" :
-                              options.mode == Mode::Batch ? "batch" : "crash") << "\n";
+                              options.mode == Mode::Batch ? "batch" :
+                              options.mode == Mode::Crash ? "crash" :
+                              options.mode == Mode::LargeValues ? "large-values" :
+                              options.mode == Mode::Compaction ? "compaction" : "recovery-crash") << "\n";
 
     std::uint64_t interrupted_batch_count = 0;
     std::uint64_t acknowledged_crash_batch_count = 0;
@@ -504,16 +514,25 @@ int main(int argc, char* argv[]) {
         const auto before_crash = oracle->snapshot();
         const std::filesystem::path pending_file = batch_prefix.string() +
             std::to_string(cycle) + "_pending.txt";
-        constexpr std::size_t pending_batch_size = 2000;
-        if (!create_interrupted_batch(pending_file, cycle, pending_batch_size, error)) {
-            terminate_server(server, error);
-            print_history(options.seed, cycle, history, error);
-            return 1;
+        const std::size_t pending_batch_size = (options.mode == Mode::LargeValues) ? 5 : 2000;
+        if (options.mode == Mode::LargeValues) {
+            std::ofstream file(pending_file, std::ios::binary | std::ios::trunc);
+            std::string large_value(1024 * 1024, 'L');
+            for (std::size_t i = 0; i < pending_batch_size; ++i) {
+                file << "PUT phase6_large_" << cycle << "_" << i << " " << large_value << "\n";
+            }
+        } else {
+            if (!create_interrupted_batch(pending_file, cycle, pending_batch_size, error)) {
+                terminate_server(server, error);
+                print_history(options.seed, cycle, history, error);
+                return 1;
+            }
         }
 
         const std::uint64_t pending_op_id = cycle * 1000 + operation_count + 100;
-        const std::string request = "BATCH " + std::to_string(pending_op_id) + " " +
-                                    pending_file.string();
+        const std::string request = (options.mode == Mode::Compaction)
+            ? "COMPACT " + std::to_string(pending_op_id)
+            : "BATCH " + std::to_string(pending_op_id) + " " + pending_file.string();
         error.clear();
         if (!server.write_line(request, error)) {
             terminate_server(server, error);
@@ -567,6 +586,15 @@ int main(int argc, char* argv[]) {
             std::filesystem::remove(pending_file, ignored);
             print_history(options.seed, cycle, history, error);
             return 1;
+        }
+
+        if (options.mode == Mode::RecoveryCrash) {
+            torture::ChildProcess recovery_proc;
+            std::string rec_err;
+            if (recovery_proc.start(options.kvdb_path, {"open", options.db_path}, rec_err)) {
+                std::this_thread::sleep_for(1ms);
+                recovery_proc.terminate(rec_err);
+            }
         }
         error.clear();
         std::error_code remove_error;

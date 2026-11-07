@@ -23,42 +23,50 @@ struct StagedOp {
     TxId tx_id;
 };
 
-// Helper: Scan remaining file to check if any valid COMMIT frame exists past broken_offset
-bool has_valid_commits_ahead(storage::File& file, std::uint64_t from_offset, std::uint64_t file_len) {
-    if (from_offset >= file_len) return false;
+// Scan past a damaged record to distinguish a torn tail from mid-log corruption.
+Status has_valid_commits_ahead(storage::File& file, std::uint64_t from_offset,
+                               std::uint64_t file_len, bool& found_commit) {
+    found_commit = false;
+    if (from_offset >= file_len) return Status::Ok;
 
-    std::vector<std::uint8_t> buf(CHUNK_SIZE);
+    const std::size_t overlap = storage::FRAME_HEADER_SIZE - 1;
     std::uint64_t cur = from_offset;
 
     while (cur < file_len) {
-        std::size_t to_read = static_cast<std::size_t>(std::min<std::uint64_t>(CHUNK_SIZE, file_len - cur));
-        if (!is_ok(file.read_at(cur, buf.data(), to_read))) {
-            return false;
-        }
+        const std::size_t to_read = static_cast<std::size_t>(
+            std::min<std::uint64_t>(CHUNK_SIZE, file_len - cur));
+        std::vector<std::uint8_t> buf(to_read);
+        Status s = file.read_at(cur, buf.data(), to_read);
+        if (!is_ok(s)) return s;
 
-        // Search for FRAME_MAGIC
         for (std::size_t i = 0; i + storage::FRAME_HEADER_SIZE <= to_read; ++i) {
-            std::uint32_t magic = storage::decode_le32(buf.data() + i);
-            if (magic == FRAME_MAGIC) {
-                storage::FrameHeader hdr;
-                if (is_ok(storage::deserialize_frame_header(buf.data() + i, to_read - i, hdr))) {
-                    if (hdr.type == RecordType::Commit) {
-                        // Check if full commit frame has valid CRC32
-                        std::size_t total_frame = hdr.total_frame_size();
-                        if (i + total_frame <= to_read) {
-                            std::uint32_t exp_crc = storage::decode_le32(buf.data() + i + total_frame - storage::CRC32_SIZE);
-                            std::uint32_t comp_crc = storage::calculate_crc32(buf.data() + i, total_frame - storage::CRC32_SIZE);
-                            if (exp_crc == comp_crc) {
-                                return true; // Found a valid commit ahead -> mid-file corruption!
-                            }
-                        }
-                    }
-                }
+            if (storage::decode_le32(buf.data() + i) != FRAME_MAGIC) continue;
+
+            storage::FrameHeader hdr;
+            s = storage::deserialize_frame_header(buf.data() + i, to_read - i, hdr);
+            if (!is_ok(s) || hdr.type != RecordType::Commit) continue;
+
+            const std::uint64_t candidate_offset = cur + i;
+            const std::size_t total_frame = hdr.total_frame_size();
+            if (total_frame > file_len - candidate_offset) continue;
+
+            std::vector<std::uint8_t> frame_bytes(total_frame);
+            s = file.read_at(candidate_offset, frame_bytes.data(), frame_bytes.size());
+            if (!is_ok(s)) return s;
+
+            const std::size_t crc_size = total_frame - storage::CRC32_SIZE;
+            const std::uint32_t expected_crc = storage::decode_le32(frame_bytes.data() + crc_size);
+            const std::uint32_t computed_crc = storage::calculate_crc32(frame_bytes.data(), crc_size);
+            if (expected_crc == computed_crc) {
+                found_commit = true;
+                return Status::Ok;
             }
         }
-        cur += to_read;
+
+        if (to_read == file_len - cur) break;
+        cur += to_read - overlap;
     }
-    return false;
+    return Status::Ok;
 }
 
 } // namespace
@@ -262,7 +270,13 @@ RecoveryStats RecoveryEngine::recover(storage::File& file, storage::Index& index
     // 4. Check for mid-file corruption vs. trailing uncommitted tail
     if (encountered_tail_issue || in_tx || last_committed_offset < file_len) {
         // If there are valid commits further ahead, this is mid-file corruption!
-        if (has_valid_commits_ahead(file, last_committed_offset, file_len)) {
+        bool found_valid_commit = false;
+        s = has_valid_commits_ahead(file, last_committed_offset, file_len, found_valid_commit);
+        if (!is_ok(s)) {
+            stats.status = s;
+            return stats;
+        }
+        if (found_valid_commit) {
             stats.status = Status::Corruption;
             return stats;
         }
