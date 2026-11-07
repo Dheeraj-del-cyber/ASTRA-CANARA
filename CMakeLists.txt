@@ -70,6 +70,15 @@ add_executable(workload_generator_tests
 )
 target_link_libraries(workload_generator_tests PRIVATE kvdb_core)
 
+add_executable(child_process_tests
+    tests/torture/child_process_test.cpp
+    tests/torture/child_process.cpp
+)
+target_include_directories(child_process_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/torture
+)
+target_link_libraries(child_process_tests PRIVATE Threads::Threads)
+
 add_executable(oracle_tests
     tests/torture/oracle_test.cpp
     tests/torture/oracle.cpp
@@ -115,7 +124,7 @@ target_include_directories(torture_tool_phase10 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/torture
 )
-target_link_libraries(torture_tool_phase10 PRIVATE Threads::Threads)
+target_link_libraries(torture_tool_phase10 PRIVATE kvdb_core Threads::Threads)
 
 # Isolated Phase 6 child-process crash/recovery runner.
 add_executable(torture_tool_phase6
@@ -124,6 +133,7 @@ add_executable(torture_tool_phase6
     tests/torture/oracle.cpp
 )
 target_link_libraries(torture_tool_phase6 PRIVATE kvdb_core)
+target_link_libraries(torture_tool_phase6 PRIVATE Threads::Threads)
 
 # Official judge torture tool matching problem statement
 add_executable(torture

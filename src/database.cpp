@@ -9,6 +9,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
 #include "crash_hook.hpp"
@@ -35,14 +36,18 @@ public:
 
         std::lock_guard<std::mutex> append_lock(write_mutex);
         TxId tx_id = next_tx_id.fetch_add(1);
+        const std::uint64_t transaction_start = file.size();
+        const auto rollback = [this, transaction_start](Status cause) {
+            const Status rollback_status = file.truncate(transaction_start);
+            if (!is_ok(rollback_status)) {
+                write_failed = true;
+                return rollback_status;
+            }
+            return cause;
+        };
 
-        // Pre-encode frames to calculate size
         storage::Frame begin_frame{RecordType::Begin, tx_id, "", ""};
         auto begin_bytes = storage::serialize_frame(begin_frame);
-
-        const std::uint64_t transaction_start = file.size();
-        std::vector<std::uint8_t> transaction_bytes;
-        transaction_bytes.insert(transaction_bytes.end(), begin_bytes.begin(), begin_bytes.end());
         std::uint64_t total_payload_bytes = begin_bytes.size();
 
         struct StagedOp {
@@ -52,66 +57,80 @@ public:
             std::uint64_t val_len;
         };
         std::vector<StagedOp> staged;
+        std::vector<std::vector<std::uint8_t>> ops_bytes;
+        ops_bytes.reserve(ops.size());
+        if (begin_bytes.size() >
+            std::numeric_limits<std::uint64_t>::max() - transaction_start) {
+            return Status::NoSpace;
+        }
         std::uint64_t current_file_offset = transaction_start + begin_bytes.size();
 
         for (const auto& op : ops) {
             RecordType rtype = (op.type == Operation::Type::Put) ? RecordType::Put : RecordType::Delete;
             storage::Frame f{rtype, tx_id, op.key, op.value};
             auto b = storage::serialize_frame(f);
+            if (b.size() > std::numeric_limits<std::uint64_t>::max() - total_payload_bytes ||
+                b.size() >                 std::numeric_limits<std::uint64_t>::max() - current_file_offset) {
+                return Status::NoSpace;
+            }
             total_payload_bytes += b.size();
-            transaction_bytes.insert(transaction_bytes.end(), b.begin(), b.end());
 
             std::uint64_t val_offset = current_file_offset + storage::FRAME_HEADER_SIZE + op.key.size();
             staged.push_back({op.type, op.key, val_offset, static_cast<std::uint64_t>(op.value.size())});
             current_file_offset += b.size();
-
+            ops_bytes.push_back(std::move(b));
         }
 
-        const std::size_t operations_end = transaction_bytes.size();
         storage::Frame commit_frame{RecordType::Commit, tx_id, "", ""};
         auto commit_bytes = storage::serialize_frame(commit_frame);
+        if (commit_bytes.size() >
+            std::numeric_limits<std::uint64_t>::max() - total_payload_bytes) {
+            return Status::NoSpace;
+        }
         total_payload_bytes += commit_bytes.size();
-        transaction_bytes.insert(transaction_bytes.end(), commit_bytes.begin(), commit_bytes.end());
 
-        // Check space capacity
         if (!concurrency::SpaceManager::has_space_for(file.size(), total_payload_bytes, config.max_bytes)) {
             return Status::NoSpace;
         }
 
-        const std::size_t commit_offset = operations_end;
-        const std::size_t commit_size = commit_bytes.size();
-
-        auto rollback_transaction = [&](Status failure) {
-            if (!is_ok(file.truncate(transaction_start))) {
-                write_failed = true;
-            }
-            return failure;
-        };
-
-        // Keep one encoded transaction buffer, writing each logical stage separately
-        // so crash hooks observe the matching on-disk transaction state.
-        Status s = file.append(transaction_bytes.data(), begin_bytes.size());
-        if (!is_ok(s)) return rollback_transaction(s);
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        torture::report_test_phase("transaction_serialized");
+#endif
+        Status s = file.append(begin_bytes.data(), begin_bytes.size());
+        if (!is_ok(s)) return rollback(s);
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
         torture::crash_if_selected("after_begin");
 #endif
 
-        const std::size_t operations_size = operations_end - begin_bytes.size();
-        s = file.append(transaction_bytes.data() + begin_bytes.size(), operations_size);
-        if (!is_ok(s)) return rollback_transaction(s);
+        for (const auto& b : ops_bytes) {
+            s = file.append(b.data(), b.size());
+            if (!is_ok(s)) return rollback(s);
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+            torture::report_test_phase("transaction_operation_written");
+#endif
+        }
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
         torture::crash_if_selected("after_operations");
+        torture::report_test_phase("transaction_before_commit");
 #endif
 
-        s = file.append(transaction_bytes.data() + commit_offset, commit_size);
-        if (!is_ok(s)) return rollback_transaction(s);
+        s = file.append(commit_bytes.data(), commit_bytes.size());
+        if (!is_ok(s)) return rollback(s);
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        torture::report_test_phase("transaction_commit_written");
+#endif
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
         torture::crash_if_selected("after_commit");
 #endif
 
-        // Durable sync before updating in-memory index or reporting success
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        torture::report_test_phase("transaction_before_sync");
+#endif
         s = file.sync();
-        if (!is_ok(s)) return rollback_transaction(s);
+        if (!is_ok(s)) return rollback(s);
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        torture::report_test_phase("transaction_synced");
+#endif
 #if defined(KVDB_ENABLE_CRASH_HOOKS)
         torture::crash_if_selected("after_sync");
 #endif
@@ -265,13 +284,24 @@ Status Database::close() {
 
     std::lock_guard<std::mutex> transaction_lock(impl_->transaction_mutex);
     impl_->lock_mgr.lock_exclusive();
-    Status sync_status = impl_->file.sync();
-    impl_->file.close();
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("database_close_before_sync");
+#endif
+    Status status = impl_->file.sync();
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("database_close_after_sync");
+    torture::report_test_phase("database_close_before_file_close");
+#endif
+    const Status close_status = impl_->file.close();
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("database_close_after_file_close");
+#endif
+    if (is_ok(status) && !is_ok(close_status)) status = close_status;
     impl_->index.clear();
     impl_->is_open = false;
     impl_->lock_mgr.unlock_exclusive();
 
-    return sync_status;
+    return status;
 }
 
 Status Database::dump(std::ostream& out) {
@@ -284,20 +314,26 @@ Status Database::dump(std::ostream& out) {
         return a.first < b.first;
     });
 
+    Status status = Status::Ok;
     for (const auto& [k, entry] : entries) {
         std::string val;
         if (entry.val_len > 0) {
             val.resize(static_cast<std::size_t>(entry.val_len));
-            impl_->file.read_at(
+            status = impl_->file.read_at(
                 entry.val_file_offset,
                 reinterpret_cast<std::uint8_t*>(&val[0]),
                 static_cast<std::size_t>(entry.val_len)
             );
+            if (!is_ok(status)) break;
         }
         out << k << "=" << val << "\n";
+        if (!out) {
+            status = Status::IoError;
+            break;
+        }
     }
     impl_->lock_mgr.unlock_shared();
-    return Status::Ok;
+    return status;
 }
 
 Status Database::check() {

@@ -21,7 +21,7 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 echo.
 echo [4/6] Torture Tool Phase 5 (Concurrency)...
-.\build\torture_tool_phase5.exe --iterations 200 --threads 4
+.\build\torture_tool_phase5.exe --reset --iterations 200 --threads 4
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 echo.

@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+#include "crash_hook.hpp"
+#endif
 
 namespace kvdb::recovery {
 
@@ -124,6 +127,9 @@ RecoveryStats RecoveryEngine::recover(storage::File& file, storage::Index& index
     bool in_tx = false;
     bool encountered_tail_issue = false;
 
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("recovery_scan");
+#endif
     while (file_read_pos < file_len || buffer_cursor < buffer.size()) {
         // Refill buffer if fewer than minimum frame bytes remain
         std::size_t remaining_in_buffer = buffer.size() - buffer_cursor;
@@ -253,6 +259,9 @@ RecoveryStats RecoveryEngine::recover(storage::File& file, storage::Index& index
             in_tx = false;
             last_committed_offset = current_frame_file_offset + total_frame_size;
             stats.committed_transactions++;
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+            torture::report_test_phase("recovery_commit_replayed");
+#endif
         }
 
         buffer_cursor += total_frame_size;
@@ -275,16 +284,17 @@ RecoveryStats RecoveryEngine::recover(storage::File& file, storage::Index& index
         // Safe tail truncation: truncate uncommitted/torn frames at physical tail
         stats.truncated_bytes = file_len - last_committed_offset;
         stats.uncommitted_transactions = in_tx ? 1 : 0;
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        torture::report_test_phase("recovery_before_tail_truncate");
+#endif
         s = file.truncate(last_committed_offset);
         if (!is_ok(s)) {
             stats.status = s;
             return stats;
         }
-        s = file.sync();
-        if (!is_ok(s)) {
-            stats.status = s;
-            return stats;
-        }
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        torture::report_test_phase("recovery_after_tail_truncate");
+#endif
         stats.clean_shutdown = false;
     } else {
         stats.clean_shutdown = true;

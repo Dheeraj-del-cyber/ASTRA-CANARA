@@ -4,7 +4,11 @@
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
+#include <cstdlib>
 #include <mutex>
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+#include "crash_hook.hpp"
+#endif
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -69,7 +73,8 @@ File::File(File&& other) noexcept = default;
 File& File::operator=(File&& other) noexcept = default;
 
 Status File::open(const std::string& path, bool create_if_missing) {
-    close();
+    const Status close_status = close();
+    if (!is_ok(close_status)) return close_status;
     impl_->path = path;
 
 #if defined(_WIN32)
@@ -133,15 +138,17 @@ Status File::close() {
     std::lock_guard<std::mutex> lock(impl_->io_mutex);
 #if defined(_WIN32)
     if (impl_->handle != INVALID_HANDLE_VALUE) {
-        CloseHandle(impl_->handle);
+        const BOOL closed = CloseHandle(impl_->handle);
         impl_->handle = INVALID_HANDLE_VALUE;
         impl_->file_size = 0;
+        if (!closed) return Status::IoError;
     }
 #else
     if (impl_->fd >= 0) {
-        ::close(impl_->fd);
+        const int fd = impl_->fd;
         impl_->fd = -1;
         impl_->file_size = 0;
+        if (::close(fd) != 0) return Status::IoError;
     }
 #endif
     return Status::Ok;
@@ -155,23 +162,32 @@ Status File::append(const std::uint8_t* data, std::size_t size) {
 
     std::size_t failure_after = 0;
     const bool inject_failure = consume_failure(testing::FileFailurePoint::Append, failure_after);
-    const std::size_t write_size = inject_failure ? std::min(size, failure_after) : size;
-    if (write_size == 0 && inject_failure) return Status::IoError;
+    const std::size_t requested_write_size = inject_failure ? std::min(size, failure_after) : size;
+    if (requested_write_size == 0 && inject_failure) return Status::IoError;
+    const std::uint64_t append_offset = impl_->file_size;
 #if defined(_WIN32)
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    bool partial_phase_reported = false;
+    const bool report_phases = std::getenv("KVDB_TEST_REPORT_PHASES") != nullptr;
+#endif
     std::size_t total_written = 0;
-    while (total_written < write_size) {
-        DWORD to_write = static_cast<DWORD>(std::min<std::size_t>(write_size - total_written, 64 * 1024 * 1024));
+    while (total_written < requested_write_size) {
+        std::size_t max_write_size = 64U * 1024U * 1024U;
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        if (report_phases) max_write_size = 64U * 1024U;
+#endif
+        DWORD to_write = static_cast<DWORD>(
+            std::min<std::size_t>(requested_write_size - total_written, max_write_size));
         DWORD written = 0;
 
         LARGE_INTEGER li;
-        li.QuadPart = static_cast<LONGLONG>(impl_->file_size + total_written);
+        li.QuadPart = static_cast<LONGLONG>(append_offset + total_written);
         if (!SetFilePointerEx(impl_->handle, li, nullptr, FILE_BEGIN)) {
             return Status::IoError;
         }
 
         if (!WriteFile(impl_->handle, data + total_written, to_write, &written, nullptr)) {
             DWORD err = GetLastError();
-            impl_->file_size += total_written;
             if (err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL) {
                 return Status::NoSpace;
             }
@@ -179,35 +195,52 @@ Status File::append(const std::uint8_t* data, std::size_t size) {
         }
 
         if (written == 0) {
-            impl_->file_size += total_written;
             return Status::IoError;
         }
         total_written += written;
+        impl_->file_size += written;
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        if (report_phases && !partial_phase_reported && total_written < size) {
+            torture::report_test_phase("file_append_partial_write");
+            partial_phase_reported = true;
+        }
+#endif
     }
-    impl_->file_size += total_written;
     return inject_failure ? Status::IoError : Status::Ok;
 #else
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    bool partial_phase_reported = false;
+    const bool report_phases = std::getenv("KVDB_TEST_REPORT_PHASES") != nullptr;
+#endif
     std::size_t total_written = 0;
-    while (total_written < write_size) {
+    while (total_written < requested_write_size) {
+        std::size_t chunk_size = requested_write_size - total_written;
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        if (report_phases) chunk_size = std::min<std::size_t>(chunk_size, 64U * 1024U);
+#endif
         ssize_t written = ::pwrite(
             impl_->fd,
             data + total_written,
-            write_size - total_written,
-            static_cast<off_t>(impl_->file_size + total_written)
+            chunk_size,
+            static_cast<off_t>(append_offset + total_written)
         );
         if (written < 0) {
             if (errno == EINTR) continue;
-            impl_->file_size += total_written;
             if (errno == ENOSPC) return Status::NoSpace;
             return Status::IoError;
         }
         if (written == 0) {
-            impl_->file_size += total_written;
             return Status::IoError;
         }
         total_written += static_cast<std::size_t>(written);
+        impl_->file_size += static_cast<std::uint64_t>(written);
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+        if (report_phases && !partial_phase_reported && total_written < size) {
+            torture::report_test_phase("file_append_partial_write");
+            partial_phase_reported = true;
+        }
+#endif
     }
-    impl_->file_size += total_written;
     return inject_failure ? Status::IoError : Status::Ok;
 #endif
 }
@@ -290,6 +323,7 @@ Status File::truncate(std::uint64_t new_size) {
     if (!is_open()) return Status::NotOpen;
 
     std::lock_guard<std::mutex> lock(impl_->io_mutex);
+    std::size_t unused_failure_bytes = 0;
 #if defined(_WIN32)
     LARGE_INTEGER li;
     li.QuadPart = static_cast<LONGLONG>(new_size);
@@ -300,6 +334,12 @@ Status File::truncate(std::uint64_t new_size) {
         return Status::IoError;
     }
     impl_->file_size = new_size;
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("file_truncate_after_size_change");
+#endif
+    if (consume_failure(testing::FileFailurePoint::Sync, unused_failure_bytes)) {
+        return Status::IoError;
+    }
     if (!FlushFileBuffers(impl_->handle)) {
         return Status::IoError;
     }
@@ -309,6 +349,12 @@ Status File::truncate(std::uint64_t new_size) {
         return Status::IoError;
     }
     impl_->file_size = new_size;
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("file_truncate_after_size_change");
+#endif
+    if (consume_failure(testing::FileFailurePoint::Sync, unused_failure_bytes)) {
+        return Status::IoError;
+    }
     #if defined(__APPLE__)
         if (::fcntl(impl_->fd, F_FULLFSYNC) != 0) return Status::IoError;
     #else

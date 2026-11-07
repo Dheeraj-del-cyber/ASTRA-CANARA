@@ -7,6 +7,9 @@
 #include <filesystem>
 #include <limits>
 #include <vector>
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+#include "crash_hook.hpp"
+#endif
 
 #if defined(_WIN32)
 #include <process.h>
@@ -68,7 +71,9 @@ Status create_unique_temp_file(const std::string& path) {
 #endif
 }
 
-Status replace_file_atomically(const std::string& temp_path, const std::string& db_path) {
+Status replace_file_atomically(const std::string& temp_path, const std::string& db_path,
+                               bool& replaced) {
+    replaced = false;
 #if defined(_WIN32)
     const std::filesystem::path temp_file(temp_path);
     const std::filesystem::path db_file(db_path);
@@ -76,8 +81,10 @@ Status replace_file_atomically(const std::string& temp_path, const std::string& 
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         return GetLastError() == ERROR_DISK_FULL ? Status::NoSpace : Status::IoError;
     }
+    replaced = true;
 #else
     if (::rename(temp_path.c_str(), db_path.c_str()) != 0) return io_status();
+    replaced = true;
 
     const std::filesystem::path parent =
         std::filesystem::path(db_path).parent_path().empty()
@@ -89,9 +96,15 @@ Status replace_file_atomically(const std::string& temp_path, const std::string& 
 #endif
     );
     if (directory_fd < 0) return io_status();
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("compaction_before_directory_sync");
+#endif
     const int sync_result = fsync(directory_fd);
     const Status sync_status = sync_result == 0 ? Status::Ok : io_status();
     ::close(directory_fd);
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    if (is_ok(sync_status)) torture::report_test_phase("compaction_after_directory_sync");
+#endif
     if (!is_ok(sync_status)) return sync_status;
 #endif
     return Status::Ok;
@@ -163,20 +176,24 @@ Status Compactor::compact(
     if (!is_ok(s)) {
         std::error_code ec;
         std::filesystem::remove(tmp_path, ec);
-        return s;
+        return ec ? Status::IoError : s;
     }
 
     const auto discard_temp = [&]() {
-        tmp_file.close();
+        const Status close_status = tmp_file.close();
         std::error_code ec;
         std::filesystem::remove(tmp_path, ec);
+        return ec ? Status::IoError : close_status;
     };
 
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("compaction_generation_started");
+#endif
     s = tmp_file.append(header.data(), header.size());
     if (!is_ok(s)) {
         const Status error = s == Status::IoError ? io_status() : s;
-        discard_temp();
-        return error;
+        const Status cleanup_status = discard_temp();
+        return is_ok(cleanup_status) ? error : cleanup_status;
     }
 
     std::vector<std::pair<std::string, storage::IndexEntry>> new_index_entries;
@@ -185,8 +202,8 @@ Status Compactor::compact(
         s = tmp_file.append(begin_bytes.data(), begin_bytes.size());
         if (!is_ok(s)) {
             const Status error = s == Status::IoError ? io_status() : s;
-            discard_temp();
-            return error;
+            const Status cleanup_status = discard_temp();
+            return is_ok(cleanup_status) ? error : cleanup_status;
         }
 
         std::uint64_t cur_tmp_offset = tmp_file.size();
@@ -195,15 +212,21 @@ Status Compactor::compact(
             std::string val;
             if (v.val_len > 0) {
                 val.resize(static_cast<std::size_t>(v.val_len));
-                file.read_at(v.val_file_offset, reinterpret_cast<std::uint8_t*>(&val[0]), static_cast<std::size_t>(v.val_len));
+                s = file.read_at(v.val_file_offset,
+                    reinterpret_cast<std::uint8_t*>(&val[0]),
+                    static_cast<std::size_t>(v.val_len));
+                if (!is_ok(s)) {
+                    const Status cleanup_status = discard_temp();
+                    return is_ok(cleanup_status) ? s : cleanup_status;
+                }
             }
             storage::Frame put_frame{RecordType::Put, tx_id, k, val};
             auto p_bytes = storage::serialize_frame(put_frame);
             s = tmp_file.append(p_bytes.data(), p_bytes.size());
             if (!is_ok(s)) {
                 const Status error = s == Status::IoError ? io_status() : s;
-                discard_temp();
-                return error;
+                const Status cleanup_status = discard_temp();
+                return is_ok(cleanup_status) ? error : cleanup_status;
             }
 
             std::uint64_t new_val_offset = cur_tmp_offset + storage::FRAME_HEADER_SIZE + k.size();
@@ -214,24 +237,36 @@ Status Compactor::compact(
         s = tmp_file.append(commit_bytes.data(), commit_bytes.size());
         if (!is_ok(s)) {
             const Status error = s == Status::IoError ? io_status() : s;
-            discard_temp();
-            return error;
+            const Status cleanup_status = discard_temp();
+            return is_ok(cleanup_status) ? error : cleanup_status;
         }
     }
 
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("compaction_generation_completed");
+    torture::report_test_phase("compaction_before_file_sync");
+#endif
     s = tmp_file.sync();
     if (!is_ok(s)) {
         const Status error = s == Status::IoError ? io_status() : s;
-        discard_temp();
-        return error;
+        const Status cleanup_status = discard_temp();
+        return is_ok(cleanup_status) ? error : cleanup_status;
     }
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("compaction_after_file_sync");
+    torture::report_test_phase("compaction_before_temp_close");
+#endif
     s = tmp_file.close();
     if (!is_ok(s)) {
         const Status error = s == Status::IoError ? io_status() : s;
         std::error_code ec;
         std::filesystem::remove(tmp_path, ec);
-        return error;
+        return ec ? Status::IoError : error;
     }
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("compaction_after_temp_close");
+    torture::report_test_phase("compaction_before_database_close");
+#endif
 
     s = file.close();
     if (!is_ok(s)) {
@@ -241,13 +276,30 @@ Status Compactor::compact(
         std::filesystem::remove(tmp_path, ec);
         return is_ok(reopen_status) ? error : reopen_status;
     }
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("compaction_after_database_close");
+#endif
 
-    s = replace_file_atomically(tmp_path, db_path);
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("compaction_before_replace");
+#endif
+    bool replaced = false;
+    s = replace_file_atomically(tmp_path, db_path, replaced);
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    if (replaced) torture::report_test_phase("compaction_after_replace");
+#endif
     const Status reopen_status = file.open(db_path, false);
     if (!is_ok(s)) {
         std::error_code ec;
         std::filesystem::remove(tmp_path, ec);
-        return is_ok(reopen_status) ? s : reopen_status;
+        if (!is_ok(reopen_status)) return reopen_status;
+        if (replaced && !entries.empty()) {
+            index.clear();
+            for (const auto& [k, v] : new_index_entries) {
+                index.put(k, v);
+            }
+        }
+        return ec ? Status::IoError : s;
     }
     if (!is_ok(reopen_status)) {
         return reopen_status;
@@ -259,6 +311,9 @@ Status Compactor::compact(
             index.put(k, v);
         }
     }
+#if defined(KVDB_ENABLE_CRASH_HOOKS)
+    torture::report_test_phase("compaction_old_file_replaced");
+#endif
     return Status::Ok;
 }
 

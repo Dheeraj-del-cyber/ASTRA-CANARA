@@ -5,6 +5,7 @@ bin/
 *.a
 *.db
 *.tmp
+*.batch
 *.log
 .vscode/
 .idea/
