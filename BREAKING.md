@@ -1,101 +1,82 @@
 # Breaking Points, Failure Modes & Engineering Trade-Offs
 
-## 1. System Crash Points & Physical Failure Analysis
+## 1. Crash Points Table
 
-### 1.1 Append-Only Write Lifecycle & Crash Scenarios
-The write pipeline follows a strict, non-negotiable write-ordering protocol:
-```text
-[BEGIN Frame] -> [Operation Frames (PUT/DEL)] -> [COMMIT Frame] -> [fsync/FlushFileBuffers] -> [Index Update] -> [ACK]
-```
+The following table analyzes critical interruption points across the write, compaction, and recovery paths, detailing on-disk state and recovery action:
 
-| Crash / Interruption Point | State on Disk | Recovery Strategy | Guarantee |
+| # | Exact Location / Function | State on Disk at Kill | What `open()` / Recovery Does |
 |---|---|---|---|
-| **Crash before or during `BEGIN`** | Empty or partial `BEGIN` frame | `RecoveryEngine` detects incomplete header / bad CRC32 at EOF; truncates to previous valid commit. | Operation completely unwritten. |
-| **Crash during `PUT` / `DEL` payload** | Partial key/value written | Frame length or CRC32 fails; tail is truncated. | Zero torn values visible. |
-| **Crash between operations in a 10,000-op batch** | First $N$ operations on disk, no `COMMIT` | Scanner buffers frames in memory. Because no matching `COMMIT` is encountered before EOF, buffered frames are discarded. Tail is truncated. | **Strict Batch Atomicity:** All-or-nothing (0 of 10,000 ops applied). |
-| **Crash after `COMMIT` write, before `fsync`** | Complete frames on disk, but not guaranteed durable | If the OS buffer was flushed to disk prior to power loss, recovery validates CRC and commits. If partially flushed, CRC fails and transaction is rolled back. | Never acknowledges an uncommitted write. |
-| **Crash after `fsync`, before Index Update / ACK** | Fully durable on non-volatile storage | Scanner reads matching `COMMIT` and updates in-memory index upon recovery. | Durable state restored; client may retry safely (idempotent). |
+| **1** | `Database::Impl::batch()` before `file.append(begin_bytes)` | 0 new bytes written; file length at previous commit. | No action required. All previously acknowledged data remains intact. |
+| **2** | `Database::Impl::batch()` during `file.append(begin_bytes)` | Torn/partial 28-byte `BEGIN` frame header at file tail. | `LogScanner` detects truncated frame header; `RecoveryEngine` truncates file back to last valid commit. |
+| **3** | `Database::Impl::batch()` between `PUT` operations | Complete `BEGIN` frame + first $K$ of $N$ operation frames; no `COMMIT`. | Recovery buffers entries in `pending_tx_entries`. Reaching EOF without `COMMIT` drops all $K$ operations and truncates tail. |
+| **4** | `Database::Impl::batch()` during `PUT` value payload | Partial key/value payload written; checksum not reached. | `LogScanner` detects CRC32 checksum mismatch or unexpected EOF; tail truncated. Zero torn values visible. |
+| **5** | `Database::Impl::batch()` before `file.append(commit_bytes)` | All $N$ operation frames on disk, but `COMMIT` marker absent. | Absence of `RecordType::Commit` frame discards all $N$ operations; file truncated to pre-batch boundary. |
+| **6** | `Database::Impl::batch()` during `file.append(commit_bytes)` | Torn/partial `COMMIT` frame written. | Checksum calculation over incomplete commit frame fails; batch is discarded and tail truncated. |
+| **7** | `Database::Impl::batch()` after `file.append(commit_bytes)`, before `file.sync()` | Complete transaction frames on disk in OS page cache; unsynced. | If OS persisted bytes, valid CRC commits them. If lost or torn, tail is truncated. Never violates promise because caller never received ACK. |
+| **8** | `Database::Impl::batch()` after `file.sync()`, before in-memory index publish | All frames including `COMMIT` physically durable on disk. | Recovery validates complete transaction, computes CRC32, and publishes keys into `Index`. Acknowledged state restored. |
+| **9** | `Compactor::compact()` during temporary file write | Active database file untouched; partial `<path>.compact.<pid>.<nonce>.tmp` exists. | `open()` opens designated primary path `<path>`. The orphan `.tmp` file is ignored and cleaned on future runs. |
+| **10** | `Compactor::compact()` during atomic rename | `MoveFileExW` / `rename()` interrupted mid-swap. | OS guarantees atomic namespace switch. Recovery opens whichever file exists (old or new), both of which are 100% valid. |
+| **11** | `RecoveryEngine::recover()` during `file.truncate()` of torn tail | File length either at original pre-recovery size or truncated offset. | Truncating to `last_committed_offset` is strictly idempotent ($f(f(x)) = f(x)$). Subsequent `open()` finishes truncation cleanly. |
 
 ---
 
-### 1.2 Compaction & Atomic File Replacement
-Compaction replaces the active database file with a deduplicated snapshot containing only the latest live keys:
-```text
-[Live Index Iteration] -> [Write .compact.<pid>.<nonce>.tmp] -> [fsync tmp] -> [Close handles] -> [Atomic Rename] -> [Reopen]
-```
+## 2. The Ordering Argument
 
-* **Crash during temporary file generation:** The active database file is untouched and fully valid. The orphaned `.tmp` file is ignored and cleaned up on future runs.
-* **Crash during atomic rename:**
-  * Windows uses `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`.
-  * POSIX uses `rename()`.
-  * Both primitives guarantee that either the original database file or the newly compacted database file is present on disk. There is zero window where neither exists.
-* **Crash after rename, before reopen:** The newly compacted file exists under the database name. Recovery scans the fresh file, verifies the header and single consolidated transaction, and succeeds.
+Our architecture guarantees the durability, atomicity, and recovery invariants through a strictly ordered sequence of system calls:
 
----
+1. **Write Path Ordering:**
+   - Transactions are serialized under `LockManager::lock_exclusive()`.
+   - Before writing any bytes to disk, total payload size is validated against `max_bytes` using `SpaceManager::has_space_for()`.
+   - Transaction frames are appended in strict order: `BEGIN` $\rightarrow$ `[PUT/DEL]*` $\rightarrow$ `COMMIT`.
+   - Physical durability is forced using `FlushFileBuffers` on Windows or `fdatasync`/`fsync` on POSIX (`File::sync()`).
+   - The in-memory `Index` is **only updated after `sync()` returns successfully**.
+   - An `ACK <op_id>` is emitted over `stdout` only after memory publication.
+   - **Why this guarantees durability:** Because `sync()` precedes the ACK response, the presence of an ACK guarantees the hardware write barrier completed. A process kill one microsecond after ACK encounters durable frames on disk.
 
-### 1.3 Mid-File Corruption vs. Crash-Torn Tail
-A critical engineering challenge in single-file databases is distinguishing between:
-1. **Uncommitted crash tail:** An incomplete write caused by a sudden process termination while appending at the end of the file.
-2. **Mid-file corruption (bit rot / bad sector):** Media degradation or disk corruption in historical committed data.
-
-#### Resolution Mechanism:
-* The recovery scanner identifies the offset of the last known valid `COMMIT` frame.
-* If a corrupted frame or checksum mismatch occurs:
-  * The engine executes a forward scan checking whether any valid `COMMIT` frames exist further down in the file (`has_valid_commits_ahead`).
-  * If valid commits exist ahead, the damage is **mid-file corruption**. Recovery refuses to discard subsequent data and aborts with `Status::Corruption`.
-  * If no valid commits exist past that point, the damage is an **uncommitted crash tail**. The file is safely truncated to the last committed offset, preserving all acknowledged transactions.
+2. **Compaction Ordering & Directory Sync:**
+   - Compaction writes to an independent temporary file (`<path>.compact.<pid>.<nonce>.tmp`).
+   - The compactor streams active keys, calls `FlushFileBuffers` / `fsync` on the temporary file, and closes the temporary handle.
+   - The primary file handle is closed, followed by atomic rename:
+     - On Windows: `MoveFileExW(temp, db, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`.
+     - On POSIX: `rename(temp, db)` followed by opening the parent directory file descriptor (`open(parent_dir, O_RDONLY)`) and issuing `fsync(directory_fd)` before closing the directory.
+   - **Why directory `fsync` matters:** On POSIX filesystems (ext4, XFS, APFS), `rename()` updates directory metadata in RAM. Without syncing the parent directory, a crash can result in directory entries pointing to deleted inodes. Calling `fsync()` on the parent directory ensures the directory entry update is physically durable before proceeding.
 
 ---
 
-## 2. Torture Testing Findings & Empirical Evidence
-
-### 2.1 Phase 4: Deterministic Random Operations
-* Tested pseudo-random PUT, GET, and DELETE sequences with fixed PRNG seeds.
-* Verified that every operation acknowledged with `Status::Ok` matches the state of an independent persistence oracle file (`oracle.ack.log`).
-* Result: **100% state parity across 500+ operations per run.**
-
-### 2.2 Phase 5: High-Concurrency Multi-Threaded Stress
-* Spawned 4 concurrent worker threads running continuous interleaved mutations and queries.
-* Tested lock contention under `std::shared_mutex` (shared readers, exclusive writers).
-* Result: **Zero data races, zero index corruption, and zero deadlocks across 500+ concurrent operations.**
-
-### 2.3 Phase 6: Subprocess Crash & Kill Injection
-* Spawned `kvdb` as an external OS subprocess.
-* Injected abrupt SIGKILL / `TerminateProcess` interruptions during active multi-operation batch writes.
-* Restarted the database and queried the state against the independent ACK journal.
-* Result: **Passed 20/20 crash/restart cycles. All unacknowledged batches were completely absent; 100% of acknowledged writes were durable.**
-
----
-
-## 3. Architectural Weaknesses & Engineering Trade-Offs
+## 3. Known Weaknesses
 
 1. **Write-Through Synchronization Overhead:**
-   * Calling hardware sync (`FlushFileBuffers` / `fsync`) on every individual single-key `put()` serializes writes to physical disk latency (~50–500 IOPS on mechanical drives or standard SSDs).
-   * *Mitigation:* The `batch()` API groups up to 10,000 operations under a single `fsync()`, multiplying throughput by up to $10,000\times$.
+   - Calling hardware sync (`FlushFileBuffers` / `fsync`) on every individual single-key `put()` serializes writes to physical disk rotational or flash commit latency (~50–500 IOPS on mechanical drives or standard SSDs).
+   - *Mitigation:* The `batch()` API groups up to 10,000 operations under a single `fsync()`, multiplying throughput by up to $10,000\times$.
 2. **In-Memory Key Overhead at Massive Scale ($> 10,000,000$ keys):**
-   * While 1,000,000 keys easily fits in ~60 MB RAM using our 24-byte log-pointer index, scaling beyond 50,000,000 keys would require multiple gigabytes of memory.
-   * *Mitigation:* Log-pointer indexing stores only offsets (`val_file_offset`, `val_len`) rather than values in RAM. Future architectures could tier keys into on-disk sparse index blocks (LSM-tree / B+ Tree).
+   - While 1,000,000 keys easily fits in ~60 MB RAM using our 24-byte log-pointer index, scaling beyond 50,000,000 keys would require multiple gigabytes of memory.
+   - *Mitigation:* Log-pointer indexing stores only offsets (`val_file_offset`, `val_len`) rather than values in RAM. Future architectures could tier keys into on-disk sparse index blocks (LSM-tree / B+ Tree).
 3. **Compaction Disk Space Headroom:**
-   * Compaction writes a complete new `.tmp` file before atomically replacing the old database. This requires at least $1\times$ the size of live data in free disk space during compaction.
+   - Compaction writes a complete new `.tmp` file before atomically replacing the old database. This requires at least $1\times$ the size of live data in free disk space during compaction.
+4. **Append-Only File Growth Prior to Compaction:**
+   - Frequent key overwrites cause stale historical frames to accumulate in the log until `compaction` is triggered. Recovery scan time is $O(\text{log\_size})$, so an uncompacted log with millions of historical writes can take longer to scan.
 
 ---
 
-## 4. Failed Attempts & Retrospectives
+## 4. What We Tried That Failed
 
 1. **MinGW Dynamic Runtime Dependency:**
-   * *Issue:* Initial builds depended on `libstdc++-6.dll` and `libgcc_s_seh-1.dll`, failing on clean judge machines without MinGW in `$PATH`.
-   * *Resolution:* Added `-static -static-libgcc -static-libstdc++` to `CMAKE_EXE_LINKER_FLAGS` in `CMakeLists.txt`, producing standalone, self-contained Windows executables.
+   - *Issue:* Initial builds depended on `libstdc++-6.dll` and `libgcc_s_seh-1.dll`, failing on clean judge machines without MinGW in `$PATH`.
+   - *Resolution:* Added `-static -static-libgcc -static-libstdc++` to `CMAKE_EXE_LINKER_FLAGS` in `CMakeLists.txt`, producing standalone, self-contained Windows executables.
 2. **Compactor Temporary Offset Double-Counting:**
-   * *Issue:* Early compaction logic initialized `cur_tmp_offset = tmp_file.size() + b_bytes.size()`, double-counting the 32-byte `BEGIN` frame offset and causing post-compaction `get()` lookups to read 32 bytes off.
-   * *Resolution:* Changed offset initialization to `cur_tmp_offset = tmp_file.size()`, ensuring index offsets directly correspond to physical frame payloads.
+   - *Issue:* Early compaction logic initialized `cur_tmp_offset = tmp_file.size() + b_bytes.size()`, double-counting the 32-byte `BEGIN` frame offset and causing post-compaction `get()` lookups to read 32 bytes off.
+   - *Resolution:* Changed offset initialization to `cur_tmp_offset = tmp_file.size()`, ensuring index offsets directly correspond to physical frame payloads.
 3. **In-Memory Value Caching:**
-   * *Issue:* The prototype stored full string values in `IndexEntry::cached_value`. Scaling tests with 1,000,000 keys caused excessive memory usage and heap fragmentation.
-   * *Resolution:* Migrated to pure Bitcask-style log pointers (`val_file_offset`, `val_len`), dropping resident RAM for 1M keys to **~60 MB** while maintaining **1.26M inserts/sec**.
+   - *Issue:* The prototype stored full string values in `IndexEntry::cached_value`. Scaling tests with 1,000,000 keys caused excessive memory usage and heap fragmentation.
+   - *Resolution:* Migrated to pure Bitcask-style log pointers (`val_file_offset`, `val_len`), dropping resident RAM for 1M keys to **~60 MB** while maintaining **1.26M inserts/sec**.
 
 ---
 
-## 5. Future Architectural Improvements
+## 5. If We Had 24 More Hours
 
-1. **Hardware-Accelerated CRC32-C:** Utilize SSE4.2 / ARM CRC32 intrinsics (`_mm_crc32_u64`) for multi-gigabyte/sec checksum calculation.
-2. **Memory-Mapped (mmap) Read Path:** For high-read workloads, memory mapping the database file can eliminate userspace buffer copies during `get()` queries.
-3. **Segmented Log Files:** Split the single append log into fixed-size segments (e.g. 64 MB segments) to allow parallel background compaction of inactive segments without full-file rewrites.
+1. **Hardware-Accelerated CRC32-C Intrinsics:**
+   - Replace software bitwise CRC32 with SSE4.2 / ARMv8 hardware-accelerated CRC32-C instructions (`_mm_crc32_u64`), increasing serialization and scan throughput to $> 5\text{ GB/s}$.
+2. **Segmented Log Files & Incremental Compaction:**
+   - Split the monolithic append log into fixed-size 64 MB segments. This enables incremental background compaction of inactive segments without rewriting the entire database file.
+3. **Zero-Copy Memory-Mapped (mmap) Read Path:**
+   - Implement read-only `mmap` mapping for value reads during `get()`, completely bypassing userspace buffer allocations and kernel context switches.
