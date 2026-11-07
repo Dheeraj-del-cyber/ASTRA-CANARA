@@ -1,4 +1,5 @@
 #include "kvdb/storage/file.hpp"
+#include "file_test_hooks.hpp"
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
@@ -17,6 +18,35 @@
 #endif
 
 namespace kvdb::storage {
+
+namespace {
+
+std::mutex failure_mutex;
+testing::FileFailurePoint failure_point = testing::FileFailurePoint::None;
+std::size_t failure_bytes_before = 0;
+
+bool consume_failure(testing::FileFailurePoint point, std::size_t& bytes_before_failure) {
+    std::lock_guard<std::mutex> lock(failure_mutex);
+    if (failure_point != point) return false;
+    bytes_before_failure = failure_bytes_before;
+    failure_point = testing::FileFailurePoint::None;
+    failure_bytes_before = 0;
+    return true;
+}
+
+} // namespace
+
+void testing::fail_next_file_operation(FileFailurePoint point, std::size_t bytes_before_failure) {
+    std::lock_guard<std::mutex> lock(failure_mutex);
+    failure_point = point;
+    failure_bytes_before = bytes_before_failure;
+}
+
+void testing::clear_file_failure() {
+    std::lock_guard<std::mutex> lock(failure_mutex);
+    failure_point = FileFailurePoint::None;
+    failure_bytes_before = 0;
+}
 
 struct File::Impl {
     std::string path;
@@ -122,10 +152,15 @@ Status File::append(const std::uint8_t* data, std::size_t size) {
     if (size == 0) return Status::Ok;
 
     std::lock_guard<std::mutex> lock(impl_->io_mutex);
+
+    std::size_t failure_after = 0;
+    const bool inject_failure = consume_failure(testing::FileFailurePoint::Append, failure_after);
+    const std::size_t write_size = inject_failure ? std::min(size, failure_after) : size;
+    if (write_size == 0 && inject_failure) return Status::IoError;
 #if defined(_WIN32)
     std::size_t total_written = 0;
-    while (total_written < size) {
-        DWORD to_write = static_cast<DWORD>(std::min<std::size_t>(size - total_written, 64 * 1024 * 1024));
+    while (total_written < write_size) {
+        DWORD to_write = static_cast<DWORD>(std::min<std::size_t>(write_size - total_written, 64 * 1024 * 1024));
         DWORD written = 0;
 
         LARGE_INTEGER li;
@@ -136,6 +171,7 @@ Status File::append(const std::uint8_t* data, std::size_t size) {
 
         if (!WriteFile(impl_->handle, data + total_written, to_write, &written, nullptr)) {
             DWORD err = GetLastError();
+            impl_->file_size += total_written;
             if (err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL) {
                 return Status::NoSpace;
             }
@@ -143,31 +179,36 @@ Status File::append(const std::uint8_t* data, std::size_t size) {
         }
 
         if (written == 0) {
+            impl_->file_size += total_written;
             return Status::IoError;
         }
         total_written += written;
     }
     impl_->file_size += total_written;
-    return Status::Ok;
+    return inject_failure ? Status::IoError : Status::Ok;
 #else
     std::size_t total_written = 0;
-    while (total_written < size) {
+    while (total_written < write_size) {
         ssize_t written = ::pwrite(
             impl_->fd,
             data + total_written,
-            size - total_written,
+            write_size - total_written,
             static_cast<off_t>(impl_->file_size + total_written)
         );
         if (written < 0) {
             if (errno == EINTR) continue;
+            impl_->file_size += total_written;
             if (errno == ENOSPC) return Status::NoSpace;
             return Status::IoError;
         }
-        if (written == 0) return Status::IoError;
+        if (written == 0) {
+            impl_->file_size += total_written;
+            return Status::IoError;
+        }
         total_written += static_cast<std::size_t>(written);
     }
     impl_->file_size += total_written;
-    return Status::Ok;
+    return inject_failure ? Status::IoError : Status::Ok;
 #endif
 }
 
@@ -225,6 +266,11 @@ Status File::sync() {
     if (!is_open()) return Status::NotOpen;
 
     std::lock_guard<std::mutex> lock(impl_->io_mutex);
+
+    std::size_t unused_failure_bytes = 0;
+    if (consume_failure(testing::FileFailurePoint::Sync, unused_failure_bytes)) {
+        return Status::IoError;
+    }
 #if defined(_WIN32)
     if (!FlushFileBuffers(impl_->handle)) {
         return Status::IoError;
@@ -234,9 +280,7 @@ Status File::sync() {
     #if defined(__APPLE__)
         if (::fcntl(impl_->fd, F_FULLFSYNC) != 0) return Status::IoError;
     #else
-        if (::fdatasync(impl_->fd) != 0) {
-            if (::fsync(impl_->fd) != 0) return Status::IoError;
-        }
+        if (::fsync(impl_->fd) != 0) return Status::IoError;
     #endif
     return Status::Ok;
 #endif
